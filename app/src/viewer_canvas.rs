@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::HtmlCanvasElement;
+use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
 use yew::prelude::*;
 
 use crate::webgl::context::GlContext;
@@ -16,15 +16,21 @@ pub struct ChannelRenderInfo {
     pub opacity: f32,
 }
 
+pub struct Camera2d {
+    pub x: f32,
+    pub y: f32,
+    pub zoom: f32,
+    pub dragging: bool,
+    pub last_mouse: (f32, f32),
+}
+
 pub struct ViewerCanvasState {
     pub renderer: Renderer,
     pub tile_textures: Vec<Vec<TileTexture>>, // [channel_idx][tile_idx]
-    pub pan: (f32, f32),
-    pub zoom: f32,
+    pub camera: Camera2d,
     pub image_size: (f32, f32),
     pub tile_size: (f32, f32),
-    pub dragging: bool,
-    pub last_mouse: (f32, f32),
+    pub max_texture_size: u32,
 }
 
 #[derive(Properties, PartialEq)]
@@ -33,6 +39,8 @@ pub struct ViewerCanvasProps {
     pub dtype_max: f32,
     #[prop_or_default]
     pub on_canvas_ready: Callback<Rc<RefCell<Option<ViewerCanvasState>>>>,
+    #[prop_or_default]
+    pub on_zoom_changed: Callback<(f32, f32, f32)>, // (zoom, canvas_w, canvas_h)
 }
 
 impl PartialEq for ChannelRenderInfo {
@@ -89,20 +97,32 @@ impl Component for ViewerCanvas {
                             Ok(renderer) => {
                                 renderer.resize(rect.width() as u32, rect.height() as u32);
                                 renderer.clear();
+                                let max_tex = renderer.gl()
+                                    .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)
+                                    .ok()
+                                    .and_then(|v| v.as_f64())
+                                    .unwrap_or(4096.0) as u32;
                                 let state = ViewerCanvasState {
                                     renderer,
                                     tile_textures: Vec::new(),
-                                    pan: (0.0, 0.0),
-                                    zoom: 1.0,
+                                    camera: Camera2d {
+                                        x: 0.0,
+                                        y: 0.0,
+                                        zoom: 1.0,
+                                        dragging: false,
+                                        last_mouse: (0.0, 0.0),
+                                    },
                                     image_size: (1.0, 1.0),
                                     tile_size: (256.0, 256.0),
-                                    dragging: false,
-                                    last_mouse: (0.0, 0.0),
+                                    max_texture_size: max_tex,
                                 };
                                 *self.state.borrow_mut() = Some(state);
                                 ctx.props()
                                     .on_canvas_ready
                                     .emit(self.state.clone());
+                                ctx.props()
+                                    .on_zoom_changed
+                                    .emit((1.0, rect.width() as f32, rect.height() as f32));
                             }
                             Err(e) => log::error!("Renderer init: {}", e),
                         },
@@ -113,20 +133,20 @@ impl Component for ViewerCanvas {
             }
             ViewerMsg::MouseDown(e) => {
                 if let Some(ref mut state) = *self.state.borrow_mut() {
-                    state.dragging = true;
-                    state.last_mouse = (e.client_x() as f32, e.client_y() as f32);
+                    state.camera.dragging = true;
+                    state.camera.last_mouse = (e.client_x() as f32, e.client_y() as f32);
                 }
                 false
             }
             ViewerMsg::MouseMove(e) => {
                 let mut needs_redraw = false;
                 if let Some(ref mut state) = *self.state.borrow_mut() {
-                    if state.dragging {
-                        let dx = e.client_x() as f32 - state.last_mouse.0;
-                        let dy = e.client_y() as f32 - state.last_mouse.1;
-                        state.pan.0 += dx;
-                        state.pan.1 += dy;
-                        state.last_mouse = (e.client_x() as f32, e.client_y() as f32);
+                    if state.camera.dragging {
+                        let dx = e.client_x() as f32 - state.camera.last_mouse.0;
+                        let dy = e.client_y() as f32 - state.camera.last_mouse.1;
+                        state.camera.x += dx;
+                        state.camera.y += dy;
+                        state.camera.last_mouse = (e.client_x() as f32, e.client_y() as f32);
                         needs_redraw = true;
                     }
                 }
@@ -137,7 +157,7 @@ impl Component for ViewerCanvas {
             }
             ViewerMsg::MouseUp(_) => {
                 if let Some(ref mut state) = *self.state.borrow_mut() {
-                    state.dragging = false;
+                    state.camera.dragging = false;
                 }
                 false
             }
@@ -145,8 +165,33 @@ impl Component for ViewerCanvas {
                 e.prevent_default();
                 if let Some(ref mut state) = *self.state.borrow_mut() {
                     let delta = -e.delta_y() as f32 * 0.001;
-                    state.zoom *= 1.0 + delta;
-                    state.zoom = state.zoom.clamp(0.01, 100.0);
+                    let factor = 1.0 + delta;
+                    let new_zoom = (state.camera.zoom * factor).clamp(0.01, 100.0);
+                    let actual_factor = new_zoom / state.camera.zoom;
+
+                    // Mouse position relative to canvas center (in pixels)
+                    if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
+                        let rect = canvas.get_bounding_client_rect();
+                        let mx = e.client_x() as f32 - rect.left() as f32 - rect.width() as f32 / 2.0;
+                        let my = e.client_y() as f32 - rect.top() as f32 - rect.height() as f32 / 2.0;
+
+                        // Adjust pan so the point under the cursor stays fixed
+                        state.camera.x = mx + (state.camera.x - mx) * actual_factor;
+                        state.camera.y = my + (state.camera.y - my) * actual_factor;
+                    }
+
+                    state.camera.zoom = new_zoom;
+                }
+                // Notify app of zoom change for level selection
+                if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
+                    let state_ref = self.state.borrow();
+                    if let Some(ref state) = *state_ref {
+                        ctx.props().on_zoom_changed.emit((
+                            state.camera.zoom,
+                            canvas.width() as f32,
+                            canvas.height() as f32,
+                        ));
+                    }
                 }
                 ctx.link().send_message(ViewerMsg::Redraw);
                 false
@@ -243,8 +288,8 @@ impl ViewerCanvas {
                     state.tile_size,
                     state.image_size,
                     (cw, ch),
-                    state.pan,
-                    state.zoom,
+                    (state.camera.x, state.camera.y),
+                    state.camera.zoom,
                     props.dtype_max,
                 );
             }

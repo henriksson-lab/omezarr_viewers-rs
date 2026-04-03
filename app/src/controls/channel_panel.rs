@@ -73,7 +73,7 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
 
     let on_cmin = {
         let cb = props.on_contrast_min.clone();
-        Callback::from(move |e: Event| {
+        Callback::from(move |e: InputEvent| {
             if let Some(input) = e.target_dyn_into::<web_sys::HtmlInputElement>() {
                 if let Ok(v) = input.value().parse::<f32>() {
                     cb.emit(v);
@@ -84,7 +84,7 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
 
     let on_cmax = {
         let cb = props.on_contrast_max.clone();
-        Callback::from(move |e: Event| {
+        Callback::from(move |e: InputEvent| {
             if let Some(input) = e.target_dyn_into::<web_sys::HtmlInputElement>() {
                 if let Ok(v) = input.value().parse::<f32>() {
                     cb.emit(v);
@@ -95,7 +95,7 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
 
     let on_opacity = {
         let cb = props.on_opacity.clone();
-        Callback::from(move |e: Event| {
+        Callback::from(move |e: InputEvent| {
             if let Some(input) = e.target_dyn_into::<web_sys::HtmlInputElement>() {
                 if let Ok(v) = input.value().parse::<f32>() {
                     cb.emit(v / 100.0);
@@ -132,7 +132,7 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
                         max={props.contrast_limit.to_string()}
                         step="1"
                         value={props.contrast_min.to_string()}
-                        onchange={on_cmin}
+                        oninput={on_cmin}
                     />
                     <span class="value">{format!("{:.0}", props.contrast_min)}</span>
                 </div>
@@ -144,7 +144,7 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
                         max={props.contrast_limit.to_string()}
                         step="1"
                         value={props.contrast_max.to_string()}
-                        onchange={on_cmax}
+                        oninput={on_cmax}
                     />
                     <span class="value">{format!("{:.0}", props.contrast_max)}</span>
                 </div>
@@ -155,7 +155,7 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
                         min="0"
                         max="100"
                         value={opacity_pct.to_string()}
-                        onchange={on_opacity}
+                        oninput={on_opacity}
                     />
                     <span class="value">{format!("{}%", opacity_pct)}</span>
                 </div>

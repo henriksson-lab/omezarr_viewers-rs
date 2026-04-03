@@ -44,6 +44,7 @@ pub enum AppMsg {
     SetChannelOpacity(usize, f32),
     SetZSlice(u32),
     SetTIndex(u32),
+    ZoomChanged(f32, f32, f32), // (zoom, canvas_w, canvas_h)
     TilesLoaded(Vec<(usize, Vec<f32>, u32, u32)>), // (channel_idx, data, w, h)
 }
 
@@ -144,6 +145,17 @@ impl Component for App {
                 self.load_tiles(ctx);
                 true
             }
+            AppMsg::ZoomChanged(zoom, canvas_w, canvas_h) => {
+                if let Some(ref info) = self.dataset {
+                    let new_level = self.pick_level(info, zoom, canvas_w, canvas_h);
+                    if new_level != self.current_level {
+                        self.current_level = new_level;
+                        self.load_tiles(ctx);
+                        return true;
+                    }
+                }
+                false
+            }
             AppMsg::TilesLoaded(tiles) => {
                 self.upload_tiles(tiles);
                 true
@@ -178,6 +190,7 @@ impl Component for App {
             .collect();
 
         let on_canvas_ready = ctx.link().callback(AppMsg::CanvasReady);
+        let on_zoom_changed = ctx.link().callback(|(z, w, h): (f32, f32, f32)| AppMsg::ZoomChanged(z, w, h));
 
         html! {
             <div class="app-container">
@@ -185,6 +198,7 @@ impl Component for App {
                     channel_info={channel_infos}
                     dtype_max={self.dtype_max}
                     on_canvas_ready={on_canvas_ready}
+                    on_zoom_changed={on_zoom_changed}
                 />
                 <div class="control-panel">
                     <h2>{"Channels"}</h2>
@@ -241,6 +255,41 @@ impl App {
             .filter_map(|(i, axis)| full.shape.get(i).map(|s| format!("{}: {}", axis.name, s)))
             .collect();
         format!("Full size: {}", dims.join(" \u{00d7} "))
+    }
+
+    /// Pick the coarsest pyramid level that still has enough resolution for the screen,
+    /// while also respecting the WebGL max texture size limit.
+    fn pick_level(&self, info: &DatasetInfo, zoom: f32, canvas_w: f32, canvas_h: f32) -> usize {
+        let axes = &info.metadata.multiscales[0].axes;
+
+        let max_tex = self.canvas_state.as_ref()
+            .and_then(|cs| cs.borrow().as_ref().map(|s| s.max_texture_size))
+            .unwrap_or(4096) as f32;
+
+        // Screen pixels used by the image = canvas_size * zoom (approximately).
+        // We want the coarsest level whose dimension >= screen pixels needed.
+        let screen_needed = canvas_w.max(canvas_h) * zoom;
+
+        let mut best = 0usize;
+        for (level, arr) in info.arrays.iter().enumerate() {
+            let mut lw = 1.0f32;
+            let mut lh = 1.0f32;
+            for (i, axis) in axes.iter().enumerate() {
+                match axis.name.as_str() {
+                    "x" => lw = arr.shape[i] as f32,
+                    "y" => lh = arr.shape[i] as f32,
+                    _ => {}
+                }
+            }
+            // Skip levels that exceed WebGL max texture size
+            if lw > max_tex || lh > max_tex {
+                continue;
+            }
+            if lw.max(lh) >= screen_needed {
+                best = level; // Sufficient resolution; keep looking for coarser
+            }
+        }
+        best
     }
 
     fn init_from_dataset(&mut self, info: &DatasetInfo) {
@@ -401,11 +450,26 @@ impl App {
             None => return,
         };
 
-        // Clear old textures
-        state.tile_textures.clear();
-        state.tile_textures.resize_with(self.channels.len(), Vec::new);
+        // Upload new textures first, then swap
+        let mut new_textures: Vec<Vec<_>> = (0..self.channels.len()).map(|_| Vec::new()).collect();
 
-        // Get image size from the dataset at current level
+        for (ch_idx, data, w, h) in tiles {
+            match state.renderer.upload_tile(w, h, &data) {
+                Ok(tex) => {
+                    if ch_idx < new_textures.len() {
+                        new_textures[ch_idx].push(tex);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to upload texture for ch {}: {}", ch_idx, e);
+                }
+            }
+        }
+
+        // Only replace old textures once new ones are ready
+        state.tile_textures = new_textures;
+
+        // Update image size from the dataset at current level
         if let Some(ref info) = self.dataset {
             let arr = &info.arrays[self.current_level];
             let axes = &info.metadata.multiscales[0].axes;
@@ -419,20 +483,7 @@ impl App {
                 }
             }
             state.image_size = (img_w, img_h);
-            state.tile_size = (img_w, img_h); // Single tile for now
-        }
-
-        for (ch_idx, data, w, h) in tiles {
-            match state.renderer.upload_tile(w, h, &data) {
-                Ok(tex) => {
-                    if ch_idx < state.tile_textures.len() {
-                        state.tile_textures[ch_idx].push(tex);
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to upload texture for ch {}: {}", ch_idx, e);
-                }
-            }
+            state.tile_size = (img_w, img_h);
         }
     }
 
