@@ -25,6 +25,8 @@ struct ChannelUiState {
 /// Root Yew component managing dataset, channels, tile loading, and layout.
 pub struct App {
     dataset: Option<DatasetInfo>,
+    datasets: Vec<String>,
+    current_dataset: Option<String>,
     channels: Vec<ChannelUiState>,
     z_slice: u32,
     t_index: u32,
@@ -37,9 +39,13 @@ pub struct App {
     tile_generation: u64,
     tiles_pending: u32,
     tiles_in_flight: HashSet<TileKey>,
+    panel_visible: bool,
 }
 
 pub enum AppMsg {
+    TogglePanel,
+    DatasetsLoaded(Vec<String>),
+    DatasetSelected(String),
     DatasetLoaded(DatasetInfo),
     LoadError(String),
     CanvasReady(Rc<RefCell<Option<ViewerCanvasState>>>),
@@ -69,7 +75,14 @@ impl Component for App {
     type Properties = ();
 
     fn create(ctx: &Context<Self>) -> Self {
-        // Fetch dataset info on mount
+        // Fetch dataset list and current dataset info on mount
+        let link = ctx.link().clone();
+        spawn_local(async move {
+            match api_client::fetch_datasets().await {
+                Ok(list) => link.send_message(AppMsg::DatasetsLoaded(list)),
+                Err(e) => log::warn!("No dataset list available: {}", e),
+            }
+        });
         let link = ctx.link().clone();
         spawn_local(async move {
             match api_client::fetch_info().await {
@@ -80,6 +93,8 @@ impl Component for App {
 
         Self {
             dataset: None,
+            datasets: Vec::new(),
+            current_dataset: None,
             channels: Vec::new(),
             z_slice: 0,
             t_index: 0,
@@ -92,15 +107,50 @@ impl Component for App {
             tile_generation: 0,
             tiles_pending: 0,
             tiles_in_flight: HashSet::new(),
+            panel_visible: true,
         }
     }
 
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
+            AppMsg::TogglePanel => {
+                self.panel_visible = !self.panel_visible;
+                true
+            }
+            AppMsg::DatasetsLoaded(list) => {
+                self.datasets = list;
+                true
+            }
+            AppMsg::DatasetSelected(name) => {
+                let link = ctx.link().clone();
+                let dataset_name = name.clone();
+                self.current_dataset = Some(name);
+                self.error = None;
+                spawn_local(async move {
+                    match api_client::open_dataset(&dataset_name).await {
+                        Ok(info) => link.send_message(AppMsg::DatasetLoaded(info)),
+                        Err(e) => link.send_message(AppMsg::LoadError(e)),
+                    }
+                });
+                true
+            }
             AppMsg::DatasetLoaded(info) => {
+                // Clear tile cache and reset state for the new dataset
+                if let Some(cs) = &self.canvas_state {
+                    if let Some(ref mut state) = *cs.borrow_mut() {
+                        state.tile_cache.clear();
+                        state.level_info.clear();
+                        state.camera.x = 0.0;
+                        state.camera.y = 0.0;
+                        state.camera.zoom = 1.0;
+                    }
+                }
+                self.tile_generation += 1;
+                self.tiles_pending = 0;
+                self.tiles_in_flight.clear();
+
                 self.init_from_dataset(&info);
                 self.dataset = Some(info);
-                // If canvas is already ready, load initial tiles
                 if self.canvas_state.is_some() {
                     self.load_tiles(ctx);
                 }
@@ -211,15 +261,12 @@ impl Component for App {
     }
 
     fn view(&self, ctx: &Context<Self>) -> Html {
-        if let Some(ref error) = self.error {
-            return html! {
-                <div class="loading">
-                    {format!("Error: {}", error)}
-                </div>
-            };
-        }
-
-        if self.dataset.is_none() {
+        if self.dataset.is_none() && self.datasets.is_empty() {
+            if let Some(ref error) = self.error {
+                return html! {
+                    <div class="loading">{format!("Error: {}", error)}</div>
+                };
+            }
             return html! {
                 <div class="loading">{"Loading dataset..."}</div>
             };
@@ -239,6 +286,9 @@ impl Component for App {
         let on_canvas_ready = ctx.link().callback(AppMsg::CanvasReady);
         let on_camera_changed = ctx.link().callback(|(px, py, z, w, h): (f32, f32, f32, f32, f32)| AppMsg::CameraChanged(px, py, z, w, h));
 
+        let panel_class = if self.panel_visible { "control-panel" } else { "control-panel hidden" };
+        let toggle_label = if self.panel_visible { "\u{2715}" } else { "\u{2630}" }; // × or ☰
+
         html! {
             <div class="app-container">
                 <ViewerCanvas
@@ -247,7 +297,29 @@ impl Component for App {
                     on_canvas_ready={on_canvas_ready}
                     on_camera_changed={on_camera_changed}
                 />
-                <div class="control-panel">
+                <button class="panel-toggle" onclick={ctx.link().callback(|_| AppMsg::TogglePanel)}>
+                    {toggle_label}
+                </button>
+                <div class={panel_class}>
+                    if !self.datasets.is_empty() {
+                        <div class="dataset-selector">
+                            <h2>{"Dataset"}</h2>
+                            <select onchange={ctx.link().callback(|e: Event| {
+                                let input: web_sys::HtmlSelectElement = e.target_unchecked_into();
+                                AppMsg::DatasetSelected(input.value())
+                            })}>
+                                <option value="" disabled=true selected={self.current_dataset.is_none()}>
+                                    {"Select dataset..."}
+                                </option>
+                                { for self.datasets.iter().map(|name| {
+                                    let selected = self.current_dataset.as_deref() == Some(name.as_str());
+                                    html! {
+                                        <option value={name.clone()} selected={selected}>{name}</option>
+                                    }
+                                })}
+                            </select>
+                        </div>
+                    }
                     <h2>{"Channels"}</h2>
                     { for self.channels.iter().enumerate().map(|(i, ch)| {
                         let link = ctx.link();
@@ -440,7 +512,7 @@ impl App {
                         (
                             format!("Ch {}", c),
                             channel_panel::default_color(c as usize),
-                            c == 0,
+                            true,
                             None,
                         )
                     }

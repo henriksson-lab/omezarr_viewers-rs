@@ -10,11 +10,21 @@ use zarrs::filesystem::FilesystemStore;
 use zarrs::group::Group;
 use zarrs_opendal::AsyncOpendalStore;
 
-/// Abstraction over local filesystem and HTTP zarr stores.
-/// For local stores, uses sync APIs. For HTTP stores, uses async APIs via opendal.
+/// Abstraction over local filesystem, HTTP, and S3 zarr stores.
 enum StoreBackend {
     Local(Arc<FilesystemStore>),
-    Http(Arc<AsyncOpendalStore>),
+    Async(Arc<AsyncOpendalStore>),
+}
+
+/// S3 connection configuration.
+#[derive(Clone)]
+pub struct S3Config {
+    pub bucket: String,
+    pub endpoint: String,
+    pub region: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub prefix: String,
 }
 
 /// Opened OME-Zarr store with parsed metadata and array handles.
@@ -43,9 +53,29 @@ impl ZarrStore {
         )?
         .finish();
         let store = Arc::new(AsyncOpendalStore::new(http_op));
-        let metadata = read_metadata_http(&store).await?;
+        let metadata = read_metadata_async(&store).await?;
         Ok(Self {
-            backend: StoreBackend::Http(store),
+            backend: StoreBackend::Async(store),
+            metadata,
+        })
+    }
+
+    /// Open a zarr store from an S3-compatible bucket.
+    pub async fn open_s3(config: &S3Config, dataset: &str) -> Result<Self> {
+        let s3_op = opendal::Operator::new(
+            opendal::services::S3::default()
+                .bucket(&config.bucket)
+                .region(&config.region)
+                .endpoint(&config.endpoint)
+                .access_key_id(&config.access_key)
+                .secret_access_key(&config.secret_key)
+                .root(&format!("/{}{}", config.prefix, dataset)),
+        )?
+        .finish();
+        let store = Arc::new(AsyncOpendalStore::new(s3_op));
+        let metadata = read_metadata_async(&store).await?;
+        Ok(Self {
+            backend: StoreBackend::Async(store),
             metadata,
         })
     }
@@ -93,7 +123,7 @@ impl ZarrStore {
                 let raw = bytes.into_fixed().map_err(|e| anyhow::anyhow!("{:?}", e))?;
                 bytes_to_f32(&raw, dtype)
             }
-            StoreBackend::Http(store) => {
+            StoreBackend::Async(store) => {
                 let array = Array::async_open(store.clone(), &array_path)
                     .await
                     .context(format!("Failed to open array at {}", array_path))?;
@@ -107,6 +137,47 @@ impl ZarrStore {
             }
         }
     }
+}
+
+/// List datasets (top-level directories) in an S3 bucket under the given prefix.
+pub async fn list_s3_datasets(config: &S3Config) -> Result<Vec<String>> {
+    log::info!(
+        "Listing S3 datasets: bucket={}, endpoint={}, prefix={}",
+        config.bucket, config.endpoint, config.prefix
+    );
+
+    let mut s3 = opendal::services::S3::default()
+        .bucket(&config.bucket)
+        .region(&config.region)
+        .endpoint(&config.endpoint);
+    if !config.access_key.is_empty() {
+        s3 = s3.access_key_id(&config.access_key)
+            .secret_access_key(&config.secret_key);
+    } else {
+        s3 = s3.allow_anonymous();
+    }
+    let op = opendal::Operator::new(s3)?.finish();
+
+    let prefix = if config.prefix.is_empty() {
+        "/".to_string()
+    } else {
+        let p = config.prefix.trim_start_matches('/');
+        if p.ends_with('/') { format!("{}", p) } else { format!("{}/", p) }
+    };
+
+    log::info!("Listing prefix: '{}'", prefix);
+    let entries = op.list(&prefix).await
+        .context(format!("Failed to list S3 bucket at prefix '{}'", prefix))?;
+
+    let datasets: Vec<String> = entries
+        .into_iter()
+        .filter(|e| e.metadata().is_dir())
+        .map(|e| e.name().trim_end_matches('/').to_string())
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    log::info!("Found {} datasets", datasets.len());
+    Ok(datasets)
 }
 
 /// Build an ArraySubset from axis names and tile coordinates.
@@ -154,7 +225,7 @@ fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<DatasetInfo> {
 }
 
 /// Read OME-Zarr metadata from an HTTP-backed store.
-async fn read_metadata_http(store: &Arc<AsyncOpendalStore>) -> Result<DatasetInfo> {
+async fn read_metadata_async(store: &Arc<AsyncOpendalStore>) -> Result<DatasetInfo> {
     let group = Group::async_open(store.clone(), "/")
         .await
         .context("Failed to open zarr group")?;

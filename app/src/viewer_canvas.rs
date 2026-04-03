@@ -27,6 +27,8 @@ pub struct Camera2d {
     pub canvas_h: f32,
     pub dragging: bool,
     pub last_mouse: (f32, f32),
+    pub pinch_dist: Option<f32>,
+    pub pinch_center: (f32, f32),
 }
 
 /// Cache key identifying a tile by pyramid level, grid position, and channel.
@@ -80,6 +82,7 @@ impl PartialEq for ChannelRenderInfo {
 pub struct ViewerCanvas {
     canvas_ref: NodeRef,
     state: Rc<RefCell<Option<ViewerCanvasState>>>,
+    _resize_closure: Option<Closure<dyn Fn()>>,
 }
 
 pub enum ViewerMsg {
@@ -88,6 +91,10 @@ pub enum ViewerMsg {
     MouseMove(MouseEvent),
     MouseUp(()),
     Wheel(WheelEvent),
+    TouchStart(web_sys::TouchEvent),
+    TouchMove(web_sys::TouchEvent),
+    TouchEnd(web_sys::TouchEvent),
+    Resize,
     Redraw,
 }
 
@@ -99,6 +106,7 @@ impl Component for ViewerCanvas {
         Self {
             canvas_ref: NodeRef::default(),
             state: Rc::new(RefCell::new(None)),
+            _resize_closure: None,
         }
     }
 
@@ -135,6 +143,8 @@ impl Component for ViewerCanvas {
                                         canvas_h: rect.height() as f32,
                                         dragging: false,
                                         last_mouse: (0.0, 0.0),
+                                        pinch_dist: None,
+                                        pinch_center: (0.0, 0.0),
                                     },
                                 };
                                 *self.state.borrow_mut() = Some(state);
@@ -149,6 +159,15 @@ impl Component for ViewerCanvas {
                         },
                         Err(e) => log::error!("WebGL init: {}", e),
                     }
+                    // Set up window resize listener
+                    let link = ctx.link().clone();
+                    let closure = Closure::wrap(Box::new(move || {
+                        link.send_message(ViewerMsg::Resize);
+                    }) as Box<dyn Fn()>);
+                    web_sys::window()
+                        .unwrap()
+                        .set_onresize(Some(closure.as_ref().unchecked_ref()));
+                    self._resize_closure = Some(closure);
                 }
                 false
             }
@@ -214,6 +233,107 @@ impl Component for ViewerCanvas {
                 ctx.link().send_message(ViewerMsg::Redraw);
                 false
             }
+            ViewerMsg::TouchStart(e) => {
+                e.prevent_default();
+                if let Some(ref mut state) = *self.state.borrow_mut() {
+                    let touches = e.touches();
+                    if touches.length() == 1 {
+                        if let Some(t) = touches.get(0) {
+                            state.camera.dragging = true;
+                            state.camera.last_mouse = (t.client_x() as f32, t.client_y() as f32);
+                            state.camera.pinch_dist = None;
+                        }
+                    } else if touches.length() == 2 {
+                        if let (Some(t0), Some(t1)) = (touches.get(0), touches.get(1)) {
+                            let dx = t1.client_x() as f32 - t0.client_x() as f32;
+                            let dy = t1.client_y() as f32 - t0.client_y() as f32;
+                            state.camera.pinch_dist = Some((dx * dx + dy * dy).sqrt());
+                            state.camera.pinch_center = (
+                                (t0.client_x() + t1.client_x()) as f32 / 2.0,
+                                (t0.client_y() + t1.client_y()) as f32 / 2.0,
+                            );
+                            state.camera.dragging = false;
+                        }
+                    }
+                }
+                false
+            }
+            ViewerMsg::TouchMove(e) => {
+                e.prevent_default();
+                let mut needs_redraw = false;
+                if let Some(ref mut state) = *self.state.borrow_mut() {
+                    let touches = e.touches();
+                    if touches.length() == 1 && state.camera.dragging {
+                        if let Some(t) = touches.get(0) {
+                            let tx = t.client_x() as f32;
+                            let ty = t.client_y() as f32;
+                            state.camera.x += tx - state.camera.last_mouse.0;
+                            state.camera.y += ty - state.camera.last_mouse.1;
+                            state.camera.last_mouse = (tx, ty);
+                            needs_redraw = true;
+                        }
+                    } else if touches.length() == 2 {
+                        if let (Some(t0), Some(t1)) = (touches.get(0), touches.get(1)) {
+                            let dx = t1.client_x() as f32 - t0.client_x() as f32;
+                            let dy = t1.client_y() as f32 - t0.client_y() as f32;
+                            let new_dist = (dx * dx + dy * dy).sqrt();
+                            let cx = (t0.client_x() + t1.client_x()) as f32 / 2.0;
+                            let cy = (t0.client_y() + t1.client_y()) as f32 / 2.0;
+
+                            if let Some(old_dist) = state.camera.pinch_dist {
+                                let factor = new_dist / old_dist;
+                                let new_zoom = (state.camera.zoom * factor).max(0.01);
+
+                                // Zoom around pinch center
+                                if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
+                                    let rect = canvas.get_bounding_client_rect();
+                                    let mx = cx - rect.left() as f32 - rect.width() as f32 / 2.0;
+                                    let my = cy - rect.top() as f32 - rect.height() as f32 / 2.0;
+                                    state.camera.x = mx + (state.camera.x - mx) * factor;
+                                    state.camera.y = my + (state.camera.y - my) * factor;
+                                }
+
+                                state.camera.zoom = new_zoom;
+                            }
+                            state.camera.pinch_dist = Some(new_dist);
+                            state.camera.pinch_center = (cx, cy);
+                            needs_redraw = true;
+                        }
+                    }
+                }
+                if needs_redraw {
+                    ctx.link().send_message(ViewerMsg::Redraw);
+                }
+                false
+            }
+            ViewerMsg::TouchEnd(e) => {
+                e.prevent_default();
+                if let Some(ref mut state) = *self.state.borrow_mut() {
+                    state.camera.dragging = false;
+                    state.camera.pinch_dist = None;
+                }
+                self.emit_camera_changed(ctx);
+                false
+            }
+            ViewerMsg::Resize => {
+                if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
+                    let rect = canvas.get_bounding_client_rect();
+                    let w = rect.width() as u32;
+                    let h = rect.height() as u32;
+                    if w > 0 && h > 0 {
+                        canvas.set_width(w);
+                        canvas.set_height(h);
+                        if let Some(ref mut state) = *self.state.borrow_mut() {
+                            state.renderer.resize(w, h);
+                            state.camera.canvas_w = w as f32;
+                            state.camera.canvas_h = h as f32;
+                        }
+                        self.emit_camera_changed(ctx);
+                        ctx.link().send_message(ViewerMsg::Redraw);
+                    }
+                }
+                false
+            }
             ViewerMsg::Redraw => {
                 self.redraw(ctx);
                 false
@@ -226,6 +346,9 @@ impl Component for ViewerCanvas {
         let on_mousemove = ctx.link().callback(ViewerMsg::MouseMove);
         let on_mouseup = ctx.link().callback(|_: MouseEvent| ViewerMsg::MouseUp(()));
         let on_wheel = ctx.link().callback(ViewerMsg::Wheel);
+        let on_touchstart = ctx.link().callback(ViewerMsg::TouchStart);
+        let on_touchmove = ctx.link().callback(ViewerMsg::TouchMove);
+        let on_touchend = ctx.link().callback(ViewerMsg::TouchEnd);
 
         html! {
             <canvas
@@ -235,6 +358,9 @@ impl Component for ViewerCanvas {
                 onmousemove={on_mousemove}
                 onmouseup={on_mouseup}
                 onwheel={on_wheel}
+                ontouchstart={on_touchstart}
+                ontouchmove={on_touchmove}
+                ontouchend={on_touchend}
             />
         }
     }

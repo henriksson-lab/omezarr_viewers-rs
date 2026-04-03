@@ -38,4 +38,8 @@ features = [
   "CssStyleDeclaration",
   "DomRect",
   "Location",
+  "HtmlSelectElement",
+  "TouchEvent",
+  "TouchList",
+  "Touch",
 ]

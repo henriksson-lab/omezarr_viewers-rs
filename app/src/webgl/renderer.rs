@@ -64,11 +64,6 @@ impl Renderer {
         })
     }
 
-    /// Access the underlying WebGL2 context.
-    pub fn gl(&self) -> &WebGl2RenderingContext {
-        &self.ctx.gl
-    }
-
     /// Upload float32 pixel data as an R32F texture.
     pub fn upload_tile(&self, width: u32, height: u32, data: &[f32]) -> Result<TileTexture, String> {
         let gl = &self.ctx.gl;

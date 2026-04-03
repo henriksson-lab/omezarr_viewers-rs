@@ -9,7 +9,7 @@ actix-web = "4"
 actix-files = "0.6"
 zarrs = { version = "0.18", features = ["filesystem", "async"] }
 zarrs_opendal = "0.7"
-opendal = { version = "0.53", features = ["services-http"] }
+opendal = { version = "0.53", features = ["services-http", "services-s3"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
