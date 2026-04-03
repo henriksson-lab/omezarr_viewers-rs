@@ -1,8 +1,9 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{HtmlCanvasElement, WebGl2RenderingContext};
+use web_sys::HtmlCanvasElement;
 use yew::prelude::*;
 
 use crate::webgl::context::GlContext;
@@ -24,13 +25,19 @@ pub struct Camera2d {
     pub last_mouse: (f32, f32),
 }
 
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+pub struct TileKey {
+    pub tile_y: u32,
+    pub tile_x: u32,
+    pub channel: usize,
+}
+
 pub struct ViewerCanvasState {
     pub renderer: Renderer,
-    pub tile_textures: Vec<Vec<TileTexture>>, // [channel_idx][tile_idx]
+    pub tile_textures: HashMap<TileKey, TileTexture>,
     pub camera: Camera2d,
     pub image_size: (f32, f32),
     pub tile_size: (f32, f32),
-    pub max_texture_size: u32,
 }
 
 #[derive(Properties, PartialEq)]
@@ -97,14 +104,9 @@ impl Component for ViewerCanvas {
                             Ok(renderer) => {
                                 renderer.resize(rect.width() as u32, rect.height() as u32);
                                 renderer.clear();
-                                let max_tex = renderer.gl()
-                                    .get_parameter(WebGl2RenderingContext::MAX_TEXTURE_SIZE)
-                                    .ok()
-                                    .and_then(|v| v.as_f64())
-                                    .unwrap_or(4096.0) as u32;
                                 let state = ViewerCanvasState {
                                     renderer,
-                                    tile_textures: Vec::new(),
+                                    tile_textures: HashMap::new(),
                                     camera: Camera2d {
                                         x: 0.0,
                                         y: 0.0,
@@ -114,7 +116,6 @@ impl Component for ViewerCanvas {
                                     },
                                     image_size: (1.0, 1.0),
                                     tile_size: (256.0, 256.0),
-                                    max_texture_size: max_tex,
                                 };
                                 *self.state.borrow_mut() = Some(state);
                                 ctx.props()
@@ -248,44 +249,46 @@ impl ViewerCanvas {
 
         let props = ctx.props();
 
-        // For each tile (currently just one full-image tile per channel)
         if state.tile_textures.is_empty() {
             return;
         }
 
-        // Build channel texture list for rendering
-        let num_tiles = state.tile_textures.get(0).map(|t| t.len()).unwrap_or(0);
-        for tile_idx in 0..num_tiles {
-            let mut channel_data: Vec<(
-                &TileTexture,
-                [f32; 3],
-                f32,
-                f32,
-                f32,
-            )> = Vec::new();
+        // Collect unique tile grid positions
+        let mut tile_positions: HashSet<(u32, u32)> = HashSet::new();
+        for key in state.tile_textures.keys() {
+            tile_positions.insert((key.tile_y, key.tile_x));
+        }
+
+        let (tw, th) = state.tile_size;
+
+        for &(ty, tx) in &tile_positions {
+            let tile_offset = (tx as f32 * tw, ty as f32 * th);
+
+            let mut channel_data: Vec<(&TileTexture, [f32; 3], f32, f32, f32)> = Vec::new();
+            let mut actual_size = state.tile_size;
 
             for (ch_idx, ch_info) in props.channel_info.iter().enumerate() {
                 if ch_info.opacity <= 0.0 {
                     continue;
                 }
-                if let Some(tiles) = state.tile_textures.get(ch_idx) {
-                    if let Some(tex) = tiles.get(tile_idx) {
-                        channel_data.push((
-                            tex,
-                            ch_info.color,
-                            ch_info.contrast_min,
-                            ch_info.contrast_max,
-                            ch_info.opacity,
-                        ));
-                    }
+                let key = TileKey { tile_y: ty, tile_x: tx, channel: ch_idx };
+                if let Some(tex) = state.tile_textures.get(&key) {
+                    actual_size = (tex.width as f32, tex.height as f32);
+                    channel_data.push((
+                        tex,
+                        ch_info.color,
+                        ch_info.contrast_min,
+                        ch_info.contrast_max,
+                        ch_info.opacity,
+                    ));
                 }
             }
 
             if !channel_data.is_empty() {
                 state.renderer.draw_tile(
                     &channel_data,
-                    (0.0, 0.0),
-                    state.tile_size,
+                    tile_offset,
+                    actual_size,
                     state.image_size,
                     (cw, ch),
                     (state.camera.x, state.camera.y),

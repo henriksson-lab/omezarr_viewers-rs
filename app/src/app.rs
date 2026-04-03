@@ -8,7 +8,7 @@ use omezarr_viewer_common::DatasetInfo;
 use crate::api_client;
 use crate::controls::axis_sliders::AxisSliders;
 use crate::controls::channel_panel::{self, ChannelPanel};
-use crate::viewer_canvas::{ChannelRenderInfo, ViewerCanvas, ViewerCanvasState};
+use crate::viewer_canvas::{ChannelRenderInfo, TileKey, ViewerCanvas, ViewerCanvasState};
 
 #[derive(Clone)]
 struct ChannelUiState {
@@ -31,6 +31,7 @@ pub struct App {
     canvas_state: Option<Rc<RefCell<Option<ViewerCanvasState>>>>,
     error: Option<String>,
     current_level: usize,
+    tile_generation: u64,
 }
 
 pub enum AppMsg {
@@ -45,7 +46,15 @@ pub enum AppMsg {
     SetZSlice(u32),
     SetTIndex(u32),
     ZoomChanged(f32, f32, f32), // (zoom, canvas_w, canvas_h)
-    TilesLoaded(Vec<(usize, Vec<f32>, u32, u32)>), // (channel_idx, data, w, h)
+    TileLoaded {
+        channel: usize,
+        tile_y: u32,
+        tile_x: u32,
+        data: Vec<f32>,
+        w: u32,
+        h: u32,
+        generation: u64,
+    },
 }
 
 impl Component for App {
@@ -73,6 +82,7 @@ impl Component for App {
             canvas_state: None,
             error: None,
             current_level: 0,
+            tile_generation: 0,
         }
     }
 
@@ -156,8 +166,21 @@ impl Component for App {
                 }
                 false
             }
-            AppMsg::TilesLoaded(tiles) => {
-                self.upload_tiles(tiles);
+            AppMsg::TileLoaded { channel, tile_y, tile_x, data, w, h, generation } => {
+                if generation != self.tile_generation {
+                    return false; // stale tile from old level/z/t
+                }
+                if let Some(cs) = &self.canvas_state {
+                    if let Some(ref mut state) = *cs.borrow_mut() {
+                        match state.renderer.upload_tile(w, h, &data) {
+                            Ok(tex) => {
+                                let key = TileKey { tile_y, tile_x, channel };
+                                state.tile_textures.insert(key, tex);
+                            }
+                            Err(e) => log::error!("Upload tile: {}", e),
+                        }
+                    }
+                }
                 true
             }
         }
@@ -257,17 +280,9 @@ impl App {
         format!("Full size: {}", dims.join(" \u{00d7} "))
     }
 
-    /// Pick the coarsest pyramid level that still has enough resolution for the screen,
-    /// while also respecting the WebGL max texture size limit.
+    /// Pick the coarsest pyramid level that still has enough resolution for the screen.
     fn pick_level(&self, info: &DatasetInfo, zoom: f32, canvas_w: f32, canvas_h: f32) -> usize {
         let axes = &info.metadata.multiscales[0].axes;
-
-        let max_tex = self.canvas_state.as_ref()
-            .and_then(|cs| cs.borrow().as_ref().map(|s| s.max_texture_size))
-            .unwrap_or(4096) as f32;
-
-        // Screen pixels used by the image = canvas_size * zoom (approximately).
-        // We want the coarsest level whose dimension >= screen pixels needed.
         let screen_needed = canvas_w.max(canvas_h) * zoom;
 
         let mut best = 0usize;
@@ -281,12 +296,8 @@ impl App {
                     _ => {}
                 }
             }
-            // Skip levels that exceed WebGL max texture size
-            if lw > max_tex || lh > max_tex {
-                continue;
-            }
             if lw.max(lh) >= screen_needed {
-                best = level; // Sufficient resolution; keep looking for coarser
+                best = level;
             }
         }
         best
@@ -385,7 +396,7 @@ impl App {
         }
     }
 
-    fn load_tiles(&self, ctx: &Context<Self>) {
+    fn load_tiles(&mut self, ctx: &Context<Self>) {
         let info = match &self.dataset {
             Some(i) => i.clone(),
             None => return,
@@ -395,7 +406,6 @@ impl App {
         let t = self.t_index as u64;
         let z = self.z_slice as u64;
 
-        // Get image dimensions at this level
         let arr = match info.arrays.get(level) {
             Some(a) => a,
             None => return,
@@ -403,15 +413,38 @@ impl App {
         let axes = &info.metadata.multiscales[0].axes;
         let mut img_w = 1u64;
         let mut img_h = 1u64;
+        let mut chunk_w = 256u64;
+        let mut chunk_h = 256u64;
         for (i, axis) in axes.iter().enumerate() {
             match axis.name.as_str() {
-                "x" => img_w = arr.shape[i],
-                "y" => img_h = arr.shape[i],
+                "x" => {
+                    img_w = arr.shape[i];
+                    if let Some(&cw) = arr.chunks.get(i) { chunk_w = cw; }
+                }
+                "y" => {
+                    img_h = arr.shape[i];
+                    if let Some(&ch) = arr.chunks.get(i) { chunk_h = ch; }
+                }
                 _ => {}
             }
         }
 
-        // Collect visible channels
+        // Use chunk size as tile size, clamped to reasonable bounds
+        let tile_w = chunk_w.max(256).min(2048);
+        let tile_h = chunk_h.max(256).min(2048);
+
+        self.tile_generation += 1;
+        let gen = self.tile_generation;
+
+        // Update image/tile size on canvas state and clear old tiles
+        if let Some(cs) = &self.canvas_state {
+            if let Some(ref mut state) = *cs.borrow_mut() {
+                state.image_size = (img_w as f32, img_h as f32);
+                state.tile_size = (tile_w as f32, tile_h as f32);
+                state.tile_textures.clear();
+            }
+        }
+
         let visible_channels: Vec<usize> = self
             .channels
             .iter()
@@ -420,70 +453,38 @@ impl App {
             .map(|(i, _)| i)
             .collect();
 
-        let link = ctx.link().clone();
+        let num_tiles_x = (img_w + tile_w - 1) / tile_w;
+        let num_tiles_y = (img_h + tile_h - 1) / tile_h;
 
-        spawn_local(async move {
-            let mut tiles = Vec::new();
-            for ch_idx in visible_channels {
-                match api_client::fetch_tile(level, t, ch_idx as u64, z, 0, 0, img_h, img_w).await
-                {
-                    Ok(data) => {
-                        tiles.push((ch_idx, data, img_w as u32, img_h as u32));
-                    }
-                    Err(e) => {
-                        log::error!("Failed to load tile for channel {}: {}", ch_idx, e);
-                    }
+        for ty in 0..num_tiles_y {
+            for tx in 0..num_tiles_x {
+                let y_start = ty * tile_h;
+                let x_start = tx * tile_w;
+                let h = tile_h.min(img_h - y_start);
+                let w = tile_w.min(img_w - x_start);
+
+                for &ch_idx in &visible_channels {
+                    let link = ctx.link().clone();
+                    let ty32 = ty as u32;
+                    let tx32 = tx as u32;
+                    spawn_local(async move {
+                        match api_client::fetch_tile(level, t, ch_idx as u64, z, y_start, x_start, h, w).await {
+                            Ok(data) => {
+                                link.send_message(AppMsg::TileLoaded {
+                                    channel: ch_idx,
+                                    tile_y: ty32,
+                                    tile_x: tx32,
+                                    data,
+                                    w: w as u32,
+                                    h: h as u32,
+                                    generation: gen,
+                                });
+                            }
+                            Err(e) => log::error!("Tile ({},{}) ch {}: {}", ty, tx, ch_idx, e),
+                        }
+                    });
                 }
             }
-            link.send_message(AppMsg::TilesLoaded(tiles));
-        });
-    }
-
-    fn upload_tiles(&mut self, tiles: Vec<(usize, Vec<f32>, u32, u32)>) {
-        let canvas_state = match &self.canvas_state {
-            Some(s) => s.clone(),
-            None => return,
-        };
-        let mut state = canvas_state.borrow_mut();
-        let state = match state.as_mut() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Upload new textures first, then swap
-        let mut new_textures: Vec<Vec<_>> = (0..self.channels.len()).map(|_| Vec::new()).collect();
-
-        for (ch_idx, data, w, h) in tiles {
-            match state.renderer.upload_tile(w, h, &data) {
-                Ok(tex) => {
-                    if ch_idx < new_textures.len() {
-                        new_textures[ch_idx].push(tex);
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to upload texture for ch {}: {}", ch_idx, e);
-                }
-            }
-        }
-
-        // Only replace old textures once new ones are ready
-        state.tile_textures = new_textures;
-
-        // Update image size from the dataset at current level
-        if let Some(ref info) = self.dataset {
-            let arr = &info.arrays[self.current_level];
-            let axes = &info.metadata.multiscales[0].axes;
-            let mut img_w = 1.0f32;
-            let mut img_h = 1.0f32;
-            for (i, axis) in axes.iter().enumerate() {
-                match axis.name.as_str() {
-                    "x" => img_w = arr.shape[i] as f32,
-                    "y" => img_h = arr.shape[i] as f32,
-                    _ => {}
-                }
-            }
-            state.image_size = (img_w, img_h);
-            state.tile_size = (img_w, img_h);
         }
     }
 
