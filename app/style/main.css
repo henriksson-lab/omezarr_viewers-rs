@@ -1,0 +1,136 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+}
+
+.app-container {
+    display: flex;
+    width: 100vw;
+    height: 100vh;
+}
+
+.viewer-canvas {
+    flex: 1;
+    display: block;
+}
+
+.control-panel {
+    width: 280px;
+    background: #16213e;
+    padding: 12px;
+    overflow-y: auto;
+    border-left: 1px solid #0f3460;
+}
+
+.control-panel h2 {
+    font-size: 14px;
+    color: #e94560;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.control-panel h3 {
+    font-size: 12px;
+    color: #aaa;
+    margin: 12px 0 6px;
+}
+
+.channel-control {
+    background: #1a1a3e;
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+}
+
+.channel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.channel-header label {
+    font-size: 13px;
+    flex: 1;
+}
+
+.channel-header input[type="checkbox"] {
+    accent-color: #e94560;
+}
+
+.slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 4px 0;
+}
+
+.slider-row label {
+    font-size: 11px;
+    width: 60px;
+    color: #888;
+}
+
+.slider-row input[type="range"] {
+    flex: 1;
+    height: 4px;
+    accent-color: #e94560;
+}
+
+.slider-row .value {
+    font-size: 11px;
+    width: 40px;
+    text-align: right;
+    color: #888;
+}
+
+.color-picker {
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    padding: 0;
+}
+
+.axis-slider {
+    margin: 8px 0;
+}
+
+.axis-slider label {
+    font-size: 12px;
+    display: block;
+    margin-bottom: 4px;
+}
+
+.axis-slider input[type="range"] {
+    width: 100%;
+    accent-color: #e94560;
+}
+
+.info-text {
+    font-size: 11px;
+    color: #666;
+    margin-top: 12px;
+}
+
+.loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100vw;
+    height: 100vh;
+    font-size: 18px;
+    color: #e94560;
+}
