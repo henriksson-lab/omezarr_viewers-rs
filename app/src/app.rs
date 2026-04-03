@@ -224,6 +224,7 @@ impl Component for App {
                                 <p>{format!("Shape: {:?}", arr.shape)}</p>
                                 <p>{format!("Dtype: {}", arr.dtype)}</p>
                             }
+                            <p>{self.full_size_label(ds)}</p>
                         }
                     </div>
                 </div>
@@ -233,6 +234,15 @@ impl Component for App {
 }
 
 impl App {
+    fn full_size_label(&self, ds: &DatasetInfo) -> String {
+        let axes = &ds.metadata.multiscales[0].axes;
+        let full = &ds.arrays[0];
+        let dims: Vec<String> = axes.iter().enumerate()
+            .filter_map(|(i, axis)| full.shape.get(i).map(|s| format!("{}: {}", axis.name, s)))
+            .collect();
+        format!("Full size: {}", dims.join(" \u{00d7} "))
+    }
+
     fn init_from_dataset(&mut self, info: &DatasetInfo) {
         let axes = &info.metadata.multiscales[0].axes;
 
