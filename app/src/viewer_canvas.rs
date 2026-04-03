@@ -187,7 +187,7 @@ impl Component for ViewerCanvas {
                 if let Some(ref mut state) = *self.state.borrow_mut() {
                     let delta = -e.delta_y() as f32 * 0.001;
                     let factor = 1.0 + delta;
-                    let new_zoom = (state.camera.zoom * factor).clamp(0.01, 100.0);
+                    let new_zoom = (state.camera.zoom * factor).max(0.01);
                     let actual_factor = new_zoom / state.camera.zoom;
 
                     // Mouse position relative to canvas center (in pixels)
