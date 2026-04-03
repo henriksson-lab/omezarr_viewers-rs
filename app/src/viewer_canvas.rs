@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -27,17 +27,26 @@ pub struct Camera2d {
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct TileKey {
+    pub level: usize,
     pub tile_y: u32,
     pub tile_x: u32,
     pub channel: usize,
 }
 
-pub struct ViewerCanvasState {
-    pub renderer: Renderer,
-    pub tile_textures: HashMap<TileKey, TileTexture>,
-    pub camera: Camera2d,
+#[derive(Clone, Debug)]
+pub struct LevelTileInfo {
     pub image_size: (f32, f32),
     pub tile_size: (f32, f32),
+    pub num_tiles_x: u32,
+    pub num_tiles_y: u32,
+}
+
+pub struct ViewerCanvasState {
+    pub renderer: Renderer,
+    pub tile_cache: HashMap<TileKey, TileTexture>,
+    pub level_info: HashMap<usize, LevelTileInfo>,
+    pub current_level: usize,
+    pub camera: Camera2d,
 }
 
 #[derive(Properties, PartialEq)]
@@ -106,7 +115,9 @@ impl Component for ViewerCanvas {
                                 renderer.clear();
                                 let state = ViewerCanvasState {
                                     renderer,
-                                    tile_textures: HashMap::new(),
+                                    tile_cache: HashMap::new(),
+                                    level_info: HashMap::new(),
+                                    current_level: 0,
                                     camera: Camera2d {
                                         x: 0.0,
                                         y: 0.0,
@@ -114,8 +125,6 @@ impl Component for ViewerCanvas {
                                         dragging: false,
                                         last_mouse: (0.0, 0.0),
                                     },
-                                    image_size: (1.0, 1.0),
-                                    tile_size: (256.0, 256.0),
                                 };
                                 *self.state.borrow_mut() = Some(state);
                                 ctx.props()
@@ -248,53 +257,84 @@ impl ViewerCanvas {
         state.renderer.clear();
 
         let props = ctx.props();
+        let cur = state.current_level;
 
-        if state.tile_textures.is_empty() {
-            return;
+        let cur_info = match state.level_info.get(&cur) {
+            Some(info) => info,
+            None => return,
+        };
+
+        // Collect levels present in cache, sorted coarsest first (higher index = coarser)
+        let mut levels_in_cache: Vec<usize> = state.level_info.keys().copied()
+            .filter(|&l| l != cur)
+            .collect();
+        levels_in_cache.sort_unstable_by(|a, b| b.cmp(a));
+
+        // Draw fallback levels first (coarsest to finest, excluding current).
+        // These provide coverage while current-level tiles are loading.
+        for &level in &levels_in_cache {
+            let info = &state.level_info[&level];
+            self.draw_level_tiles(state, props, level, info, cur_info.image_size, cw, ch);
         }
 
-        // Collect unique tile grid positions
-        let mut tile_positions: HashSet<(u32, u32)> = HashSet::new();
-        for key in state.tile_textures.keys() {
-            tile_positions.insert((key.tile_y, key.tile_x));
-        }
+        // Draw current level on top — replaces fallback where loaded (blend alpha=1)
+        self.draw_level_tiles(state, props, cur, cur_info, cur_info.image_size, cw, ch);
+    }
 
-        let (tw, th) = state.tile_size;
+    fn draw_level_tiles(
+        &self,
+        state: &ViewerCanvasState,
+        props: &ViewerCanvasProps,
+        level: usize,
+        info: &LevelTileInfo,
+        render_image_size: (f32, f32),
+        cw: f32,
+        ch: f32,
+    ) {
+        let (tw, th) = info.tile_size;
+        // Scale factor: map this level's pixel coords to the current level's image coords
+        let sx = render_image_size.0 / info.image_size.0;
+        let sy = render_image_size.1 / info.image_size.1;
 
-        for &(ty, tx) in &tile_positions {
-            let tile_offset = (tx as f32 * tw, ty as f32 * th);
+        for ty in 0..info.num_tiles_y {
+            for tx in 0..info.num_tiles_x {
+                let mut channel_data: Vec<(&TileTexture, [f32; 3], f32, f32, f32)> = Vec::new();
+                let mut actual_w = tw;
+                let mut actual_h = th;
 
-            let mut channel_data: Vec<(&TileTexture, [f32; 3], f32, f32, f32)> = Vec::new();
-            let mut actual_size = state.tile_size;
-
-            for (ch_idx, ch_info) in props.channel_info.iter().enumerate() {
-                if ch_info.opacity <= 0.0 {
-                    continue;
+                for (ch_idx, ch_info) in props.channel_info.iter().enumerate() {
+                    if ch_info.opacity <= 0.0 {
+                        continue;
+                    }
+                    let key = TileKey { level, tile_y: ty, tile_x: tx, channel: ch_idx };
+                    if let Some(tex) = state.tile_cache.get(&key) {
+                        actual_w = tex.width as f32;
+                        actual_h = tex.height as f32;
+                        channel_data.push((
+                            tex,
+                            ch_info.color,
+                            ch_info.contrast_min,
+                            ch_info.contrast_max,
+                            ch_info.opacity,
+                        ));
+                    }
                 }
-                let key = TileKey { tile_y: ty, tile_x: tx, channel: ch_idx };
-                if let Some(tex) = state.tile_textures.get(&key) {
-                    actual_size = (tex.width as f32, tex.height as f32);
-                    channel_data.push((
-                        tex,
-                        ch_info.color,
-                        ch_info.contrast_min,
-                        ch_info.contrast_max,
-                        ch_info.opacity,
-                    ));
-                }
-            }
 
-            if !channel_data.is_empty() {
-                state.renderer.draw_tile(
-                    &channel_data,
-                    tile_offset,
-                    actual_size,
-                    state.image_size,
-                    (cw, ch),
-                    (state.camera.x, state.camera.y),
-                    state.camera.zoom,
-                    props.dtype_max,
-                );
+                if !channel_data.is_empty() {
+                    let tile_offset = (tx as f32 * tw * sx, ty as f32 * th * sy);
+                    let tile_size = (actual_w * sx, actual_h * sy);
+
+                    state.renderer.draw_tile(
+                        &channel_data,
+                        tile_offset,
+                        tile_size,
+                        render_image_size,
+                        (cw, ch),
+                        (state.camera.x, state.camera.y),
+                        state.camera.zoom,
+                        props.dtype_max,
+                    );
+                }
             }
         }
     }

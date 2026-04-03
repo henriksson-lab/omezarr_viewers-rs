@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
@@ -8,7 +9,7 @@ use omezarr_viewer_common::DatasetInfo;
 use crate::api_client;
 use crate::controls::axis_sliders::AxisSliders;
 use crate::controls::channel_panel::{self, ChannelPanel};
-use crate::viewer_canvas::{ChannelRenderInfo, TileKey, ViewerCanvas, ViewerCanvasState};
+use crate::viewer_canvas::{ChannelRenderInfo, LevelTileInfo, TileKey, ViewerCanvas, ViewerCanvasState};
 
 #[derive(Clone)]
 struct ChannelUiState {
@@ -47,6 +48,7 @@ pub enum AppMsg {
     SetTIndex(u32),
     ZoomChanged(f32, f32, f32), // (zoom, canvas_w, canvas_h)
     TileLoaded {
+        level: usize,
         channel: usize,
         tile_y: u32,
         tile_x: u32,
@@ -166,7 +168,7 @@ impl Component for App {
                 }
                 false
             }
-            AppMsg::TileLoaded { channel, tile_y, tile_x, data, w, h, generation } => {
+            AppMsg::TileLoaded { level, channel, tile_y, tile_x, data, w, h, generation } => {
                 if generation != self.tile_generation {
                     return false; // stale tile from old level/z/t
                 }
@@ -174,8 +176,8 @@ impl Component for App {
                     if let Some(ref mut state) = *cs.borrow_mut() {
                         match state.renderer.upload_tile(w, h, &data) {
                             Ok(tex) => {
-                                let key = TileKey { tile_y, tile_x, channel };
-                                state.tile_textures.insert(key, tex);
+                                let key = TileKey { level, tile_y, tile_x, channel };
+                                state.tile_cache.insert(key, tex);
                             }
                             Err(e) => log::error!("Upload tile: {}", e),
                         }
@@ -429,19 +431,33 @@ impl App {
             }
         }
 
-        // Use chunk size as tile size, clamped to reasonable bounds
         let tile_w = chunk_w.max(256).min(2048);
         let tile_h = chunk_h.max(256).min(2048);
+        let num_tiles_x = ((img_w + tile_w - 1) / tile_w) as u32;
+        let num_tiles_y = ((img_h + tile_h - 1) / tile_h) as u32;
 
         self.tile_generation += 1;
         let gen = self.tile_generation;
 
-        // Update image/tile size on canvas state and clear old tiles
+        // Register level info and set current level on canvas state.
+        // Evict cached tiles from levels other than current and its fallbacks.
         if let Some(cs) = &self.canvas_state {
             if let Some(ref mut state) = *cs.borrow_mut() {
-                state.image_size = (img_w as f32, img_h as f32);
-                state.tile_size = (tile_w as f32, tile_h as f32);
-                state.tile_textures.clear();
+                state.level_info.insert(level, LevelTileInfo {
+                    image_size: (img_w as f32, img_h as f32),
+                    tile_size: (tile_w as f32, tile_h as f32),
+                    num_tiles_x,
+                    num_tiles_y,
+                });
+                state.current_level = level;
+
+                // Keep only current level and coarser levels (potential fallbacks)
+                let keep_levels: HashSet<usize> = state.level_info.keys()
+                    .copied()
+                    .filter(|&l| l >= level)
+                    .collect();
+                state.tile_cache.retain(|k, _| keep_levels.contains(&k.level));
+                state.level_info.retain(|l, _| keep_levels.contains(l));
             }
         }
 
@@ -453,11 +469,8 @@ impl App {
             .map(|(i, _)| i)
             .collect();
 
-        let num_tiles_x = (img_w + tile_w - 1) / tile_w;
-        let num_tiles_y = (img_h + tile_h - 1) / tile_h;
-
-        for ty in 0..num_tiles_y {
-            for tx in 0..num_tiles_x {
+        for ty in 0..num_tiles_y as u64 {
+            for tx in 0..num_tiles_x as u64 {
                 let y_start = ty * tile_h;
                 let x_start = tx * tile_w;
                 let h = tile_h.min(img_h - y_start);
@@ -471,6 +484,7 @@ impl App {
                         match api_client::fetch_tile(level, t, ch_idx as u64, z, y_start, x_start, h, w).await {
                             Ok(data) => {
                                 link.send_message(AppMsg::TileLoaded {
+                                    level,
                                     channel: ch_idx,
                                     tile_y: ty32,
                                     tile_x: tx32,

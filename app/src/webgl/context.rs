@@ -24,11 +24,12 @@ impl GlContext {
         let program = create_program(&gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
         gl.use_program(Some(&program));
 
-        // Enable blending for additive channel compositing
+        // Enable blending — channel compositing happens in shader,
+        // GL blend just needs latest draw to replace previous (alpha=1.0)
         gl.enable(WebGl2RenderingContext::BLEND);
         gl.blend_func(
-            WebGl2RenderingContext::ONE,
-            WebGl2RenderingContext::ONE,
+            WebGl2RenderingContext::SRC_ALPHA,
+            WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
         );
 
         Ok(Self { gl, program })
