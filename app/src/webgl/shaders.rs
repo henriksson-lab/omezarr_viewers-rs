@@ -63,7 +63,7 @@ void main() {
     vec3 rgb = vec3(0.0);
     for (int i = 0; i < 6; i++) {
         if (i >= u_num_channels) break;
-        float raw = get_channel(i) * u_dtype_max;
+        float raw = get_channel(i);
         float normed = clamp(
             (raw - u_contrast[i].x) / max(u_contrast[i].y - u_contrast[i].x, 0.001),
             0.0, 1.0

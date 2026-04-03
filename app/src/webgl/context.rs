@@ -17,6 +17,10 @@ impl GlContext {
             .dyn_into::<WebGl2RenderingContext>()
             .map_err(|_| "Failed to cast to WebGl2RenderingContext")?;
 
+        // Enable linear filtering for float textures (R32F)
+        gl.get_extension("OES_texture_float_linear")
+            .map_err(|_| "OES_texture_float_linear not available")?;
+
         let program = create_program(&gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
         gl.use_program(Some(&program));
 
