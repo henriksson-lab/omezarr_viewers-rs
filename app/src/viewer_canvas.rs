@@ -9,6 +9,7 @@ use yew::prelude::*;
 use crate::webgl::context::GlContext;
 use crate::webgl::renderer::{Renderer, TileTexture};
 
+/// Per-channel rendering parameters passed as props to the canvas.
 #[derive(Clone)]
 pub struct ChannelRenderInfo {
     pub color: [f32; 3],
@@ -17,6 +18,7 @@ pub struct ChannelRenderInfo {
     pub opacity: f32,
 }
 
+/// 2D camera state: pan position, zoom level, and drag tracking.
 pub struct Camera2d {
     pub x: f32,
     pub y: f32,
@@ -27,6 +29,7 @@ pub struct Camera2d {
     pub last_mouse: (f32, f32),
 }
 
+/// Cache key identifying a tile by pyramid level, grid position, and channel.
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct TileKey {
     pub level: usize,
@@ -35,6 +38,7 @@ pub struct TileKey {
     pub channel: usize,
 }
 
+/// Tile grid metadata for a single pyramid level.
 #[derive(Clone, Debug)]
 pub struct LevelTileInfo {
     pub image_size: (f32, f32),
@@ -43,6 +47,7 @@ pub struct LevelTileInfo {
     pub num_tiles_y: u32,
 }
 
+/// Shared mutable state between App (tile uploads) and ViewerCanvas (rendering).
 pub struct ViewerCanvasState {
     pub renderer: Renderer,
     pub tile_cache: HashMap<TileKey, TileTexture>,
@@ -51,6 +56,7 @@ pub struct ViewerCanvasState {
     pub camera: Camera2d,
 }
 
+/// Props for the ViewerCanvas component.
 #[derive(Properties, PartialEq)]
 pub struct ViewerCanvasProps {
     pub channel_info: Vec<ChannelRenderInfo>,
@@ -70,6 +76,7 @@ impl PartialEq for ChannelRenderInfo {
     }
 }
 
+/// WebGL2 canvas component handling rendering, pan, and zoom.
 pub struct ViewerCanvas {
     canvas_ref: NodeRef,
     state: Rc<RefCell<Option<ViewerCanvasState>>>,
@@ -240,6 +247,7 @@ impl Component for ViewerCanvas {
 }
 
 impl ViewerCanvas {
+    /// Notify the parent App of the current camera state.
     fn emit_camera_changed(&self, ctx: &Context<Self>) {
         if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
             let state_ref = self.state.borrow();
@@ -255,6 +263,7 @@ impl ViewerCanvas {
         }
     }
 
+    /// Clear and redraw all visible tiles, rendering fallback levels first.
     fn redraw(&self, ctx: &Context<Self>) {
         let state_ref = self.state.borrow();
         let state = match state_ref.as_ref() {
@@ -297,6 +306,7 @@ impl ViewerCanvas {
         self.draw_level_tiles(state, props, cur, cur_info, cur_info.image_size, cw, ch);
     }
 
+    /// Render all cached tiles for a single pyramid level, scaled to the current image coordinate space.
     fn draw_level_tiles(
         &self,
         state: &ViewerCanvasState,

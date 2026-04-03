@@ -18,6 +18,7 @@ pub struct Multiscale {
     pub name: Option<String>,
 }
 
+/// A single axis in the multiscale specification (e.g. x, y, z, c, t).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Axis {
     pub name: String,
@@ -26,6 +27,7 @@ pub struct Axis {
     pub unit: Option<String>,
 }
 
+/// Reference to a single resolution level within a multiscale pyramid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiscaleDataset {
     pub path: String,
@@ -51,6 +53,7 @@ pub struct OmeroMetadata {
     pub rdefs: Option<OmeroRdefs>,
 }
 
+/// OMERO rendering settings for a single channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OmeroChannel {
     #[serde(default)]
@@ -63,6 +66,7 @@ pub struct OmeroChannel {
     pub window: Option<ChannelWindow>,
 }
 
+/// Contrast window (min/max display range) for a channel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelWindow {
     pub start: f64,
@@ -71,6 +75,7 @@ pub struct ChannelWindow {
     pub max: f64,
 }
 
+/// OMERO rendering defaults (default z/t indices, color model).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OmeroRdefs {
     #[serde(default)]
@@ -121,6 +126,7 @@ pub struct ViewerState {
     pub t_index: u32,
 }
 
+/// Per-channel state in the shared viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelState {
     pub index: usize,

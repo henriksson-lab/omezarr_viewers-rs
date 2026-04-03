@@ -17,6 +17,7 @@ enum StoreBackend {
     Http(Arc<AsyncOpendalStore>),
 }
 
+/// Opened OME-Zarr store with parsed metadata and array handles.
 pub struct ZarrStore {
     backend: StoreBackend,
     metadata: DatasetInfo,
@@ -58,6 +59,7 @@ impl ZarrStore {
         }
     }
 
+    /// Return a reference to the parsed dataset metadata.
     pub fn metadata(&self) -> &DatasetInfo {
         &self.metadata
     }
@@ -107,6 +109,7 @@ impl ZarrStore {
     }
 }
 
+/// Build an ArraySubset from axis names and tile coordinates.
 fn build_subset(
     axes: &[Axis],
     _ndim: usize,
@@ -132,6 +135,7 @@ fn build_subset(
     Ok(ArraySubset::new_with_ranges(&ranges))
 }
 
+/// Read OME-Zarr metadata from a local filesystem store.
 fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<DatasetInfo> {
     let group = Group::open(store.clone(), "/").context("Failed to open zarr group")?;
     let attrs = group.attributes();
@@ -149,6 +153,7 @@ fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<DatasetInfo> {
     })
 }
 
+/// Read OME-Zarr metadata from an HTTP-backed store.
 async fn read_metadata_http(store: &Arc<AsyncOpendalStore>) -> Result<DatasetInfo> {
     let group = Group::async_open(store.clone(), "/")
         .await
@@ -181,6 +186,7 @@ async fn read_metadata_http(store: &Arc<AsyncOpendalStore>) -> Result<DatasetInf
     })
 }
 
+/// Parse the multiscales array from zarr group attributes.
 fn parse_multiscales(attrs: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<Multiscale>> {
     if let Some(ms) = attrs.get("multiscales") {
         serde_json::from_value(ms.clone()).context("Failed to parse multiscales")
@@ -194,6 +200,7 @@ fn parse_multiscales(attrs: &serde_json::Map<String, serde_json::Value>) -> Resu
     }
 }
 
+/// Parse dataset metadata and open arrays for each resolution level.
 fn parse_metadata<F>(
     attrs: &serde_json::Map<String, serde_json::Value>,
     open_array: F,
@@ -217,6 +224,7 @@ where
     })
 }
 
+/// Convert raw bytes to f32 based on the array dtype.
 fn bytes_to_f32(raw: &[u8], dtype: &str) -> Result<Vec<f32>> {
     match dtype {
         "uint8" => Ok(raw.iter().map(|&b| b as f32).collect()),

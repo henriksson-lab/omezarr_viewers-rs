@@ -1,6 +1,7 @@
 use gloo_net::http::Request;
 use omezarr_viewer_common::DatasetInfo;
 
+/// Derive the API base URL from the current browser location.
 fn get_host_url() -> String {
     let window = web_sys::window().expect("no window");
     let location = window.location();
@@ -9,6 +10,7 @@ fn get_host_url() -> String {
     format!("{}//{}", protocol, host)
 }
 
+/// Fetch dataset metadata from the server.
 pub async fn fetch_info() -> Result<DatasetInfo, String> {
     let url = format!("{}/api/info", get_host_url());
     let resp = Request::get(&url)
@@ -23,6 +25,7 @@ pub async fn fetch_info() -> Result<DatasetInfo, String> {
         .map_err(|e| format!("parse info: {}", e))
 }
 
+/// Fetch a rectangular tile region as float32 pixel data.
 pub async fn fetch_tile(
     level: usize,
     t: u64,

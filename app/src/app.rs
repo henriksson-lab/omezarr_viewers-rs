@@ -11,6 +11,7 @@ use crate::controls::axis_sliders::AxisSliders;
 use crate::controls::channel_panel::{self, ChannelPanel};
 use crate::viewer_canvas::{ChannelRenderInfo, LevelTileInfo, TileKey, ViewerCanvas, ViewerCanvasState};
 
+/// UI state for a single channel: visibility, color, contrast, and opacity.
 #[derive(Clone)]
 struct ChannelUiState {
     label: String,
@@ -21,6 +22,7 @@ struct ChannelUiState {
     opacity: f32,
 }
 
+/// Root Yew component managing dataset, channels, tile loading, and layout.
 pub struct App {
     dataset: Option<DatasetInfo>,
     channels: Vec<ChannelUiState>,
@@ -294,6 +296,7 @@ impl Component for App {
 }
 
 impl App {
+    /// Format the tile cache status string for the info panel.
     fn tiles_status(&self) -> String {
         let (tile_size, cache_size) = self.canvas_state.as_ref()
             .and_then(|cs| cs.borrow().as_ref().map(|s| {
@@ -312,6 +315,7 @@ impl App {
         }
     }
 
+    /// Format the full-resolution image dimensions for display.
     fn full_size_label(&self, ds: &DatasetInfo) -> String {
         let axes = &ds.metadata.multiscales[0].axes;
         let full = &ds.arrays[0];
@@ -368,6 +372,7 @@ impl App {
         best
     }
 
+    /// Initialize channels, axes, and level from dataset metadata.
     fn init_from_dataset(&mut self, info: &DatasetInfo) {
         let axes = &info.metadata.multiscales[0].axes;
 
@@ -676,6 +681,7 @@ impl App {
         }
     }
 
+    /// Signal a redraw by returning true from update (props change triggers ViewerCanvas::changed).
     fn trigger_redraw(&self) {
         // The redraw happens automatically via ViewerCanvas::changed()
         // since we return true from update which re-renders with new props

@@ -4,15 +4,18 @@ use std::sync::Arc;
 
 use crate::zarr_reader::ZarrStore;
 
+/// Shared application state holding the ZarrStore for request handlers.
 pub struct AppState {
     pub store: Arc<ZarrStore>,
 }
 
+/// Handle GET /api/info — return dataset metadata as JSON.
 #[get("/api/info")]
 pub async fn info(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(data.store.metadata())
 }
 
+/// Query parameters for the /api/tile endpoint.
 #[derive(Deserialize)]
 pub struct TileQuery {
     level: usize,
@@ -28,6 +31,7 @@ pub struct TileQuery {
     w: u64,
 }
 
+/// Handle GET /api/tile — return raw float32 tile data.
 #[get("/api/tile")]
 pub async fn tile(data: web::Data<AppState>, query: web::Query<TileQuery>) -> impl Responder {
     let q = query.into_inner();

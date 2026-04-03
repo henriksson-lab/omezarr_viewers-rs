@@ -3,12 +3,14 @@ use web_sys::{HtmlCanvasElement, WebGl2RenderingContext, WebGlProgram, WebGlShad
 
 use super::shaders;
 
+/// WebGL2 context wrapper holding the GL handle and compiled shader program.
 pub struct GlContext {
     pub gl: WebGl2RenderingContext,
     pub program: WebGlProgram,
 }
 
 impl GlContext {
+    /// Create a WebGL2 context from a canvas element, compile shaders, and enable blending.
     pub fn new(canvas: &HtmlCanvasElement) -> Result<Self, String> {
         let gl = canvas
             .get_context("webgl2")
@@ -36,6 +38,7 @@ impl GlContext {
     }
 }
 
+/// Compile a GLSL shader source string.
 fn compile_shader(
     gl: &WebGl2RenderingContext,
     shader_type: u32,
@@ -62,6 +65,7 @@ fn compile_shader(
     }
 }
 
+/// Link vertex and fragment shaders into a program.
 fn create_program(
     gl: &WebGl2RenderingContext,
     vs_source: &str,

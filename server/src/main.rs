@@ -12,6 +12,7 @@ use zarr_reader::ZarrStore;
 const DEFAULT_STORE: &str = "http://localhost:8079/zarr-test/2079_R1.zarr";
 
 #[derive(Parser)]
+/// Command-line arguments for the server.
 #[command(name = "omezarr-viewer")]
 #[command(about = "OME-Zarr web viewer server")]
 struct Cli {
@@ -24,6 +25,7 @@ struct Cli {
     bind: String,
 }
 
+/// Start the actix-web server, open the Zarr store, and serve the API + static files.
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));

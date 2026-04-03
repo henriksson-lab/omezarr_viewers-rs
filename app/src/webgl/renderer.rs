@@ -3,18 +3,21 @@ use web_sys::{WebGl2RenderingContext, WebGlTexture};
 
 use super::context::GlContext;
 
+/// A WebGL texture uploaded for a single tile, with its pixel dimensions.
 pub struct TileTexture {
     pub texture: WebGlTexture,
     pub width: u32,
     pub height: u32,
 }
 
+/// WebGL2 renderer that uploads tile textures and draws multi-channel quads.
 pub struct Renderer {
     ctx: GlContext,
     quad_vao: web_sys::WebGlVertexArrayObject,
 }
 
 impl Renderer {
+    /// Create a renderer with a unit quad VAO for tile drawing.
     pub fn new(ctx: GlContext) -> Result<Self, String> {
         let gl = &ctx.gl;
 
@@ -61,10 +64,12 @@ impl Renderer {
         })
     }
 
+    /// Access the underlying WebGL2 context.
     pub fn gl(&self) -> &WebGl2RenderingContext {
         &self.ctx.gl
     }
 
+    /// Upload float32 pixel data as an R32F texture.
     pub fn upload_tile(&self, width: u32, height: u32, data: &[f32]) -> Result<TileTexture, String> {
         let gl = &self.ctx.gl;
 
@@ -203,12 +208,14 @@ impl Renderer {
         gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
     }
 
+    /// Clear the framebuffer to the background color.
     pub fn clear(&self) {
         let gl = &self.ctx.gl;
         gl.clear_color(0.1, 0.1, 0.12, 1.0);
         gl.clear(WebGl2RenderingContext::COLOR_BUFFER_BIT);
     }
 
+    /// Update the GL viewport to match new canvas dimensions.
     pub fn resize(&self, width: u32, height: u32) {
         self.ctx.gl.viewport(0, 0, width as i32, height as i32);
     }

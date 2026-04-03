@@ -1,5 +1,6 @@
 use yew::prelude::*;
 
+/// Props for the Z-slice and time point sliders.
 #[derive(Properties, PartialEq)]
 pub struct AxisSlidersProps {
     pub z_max: u32,
@@ -10,6 +11,7 @@ pub struct AxisSlidersProps {
     pub on_t_change: Callback<u32>,
 }
 
+/// Render Z-slice and time point sliders (hidden when max <= 1).
 #[function_component(AxisSliders)]
 pub fn axis_sliders(props: &AxisSlidersProps) -> Html {
     let on_z = {

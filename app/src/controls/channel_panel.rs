@@ -9,10 +9,12 @@ const DEFAULT_COLORS: [[f32; 3]; 6] = [
     [0.0, 0.0, 1.0], // blue
 ];
 
+/// Return a default channel color by index (green, red, blue, ...).
 pub fn default_color(index: usize) -> [f32; 3] {
     DEFAULT_COLORS[index % DEFAULT_COLORS.len()]
 }
 
+/// Convert an RGB float triplet to a hex color string.
 pub fn color_to_hex(c: &[f32; 3]) -> String {
     format!(
         "#{:02x}{:02x}{:02x}",
@@ -22,6 +24,7 @@ pub fn color_to_hex(c: &[f32; 3]) -> String {
     )
 }
 
+/// Parse a hex color string into an RGB float triplet.
 fn hex_to_color(hex: &str) -> Option<[f32; 3]> {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
@@ -33,6 +36,7 @@ fn hex_to_color(hex: &str) -> Option<[f32; 3]> {
     Some([r, g, b])
 }
 
+/// Props for the per-channel control panel (sliders, color picker, visibility).
 #[derive(Properties, PartialEq)]
 pub struct ChannelPanelProps {
     pub index: usize,
@@ -50,6 +54,7 @@ pub struct ChannelPanelProps {
     pub on_opacity: Callback<f32>,
 }
 
+/// Render the control panel for a single channel.
 #[function_component(ChannelPanel)]
 pub fn channel_panel(props: &ChannelPanelProps) -> Html {
     let on_vis = {
