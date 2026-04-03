@@ -21,11 +21,13 @@ body {
 
 .viewer-canvas {
     flex: 1;
+    min-width: 0;
     display: block;
 }
 
 .control-panel {
     width: 280px;
+    flex-shrink: 0;
     background: #16213e;
     padding: 12px;
     overflow-y: auto;
