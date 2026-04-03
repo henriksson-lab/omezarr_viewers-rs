@@ -21,6 +21,8 @@ pub struct Camera2d {
     pub x: f32,
     pub y: f32,
     pub zoom: f32,
+    pub canvas_w: f32,
+    pub canvas_h: f32,
     pub dragging: bool,
     pub last_mouse: (f32, f32),
 }
@@ -56,7 +58,7 @@ pub struct ViewerCanvasProps {
     #[prop_or_default]
     pub on_canvas_ready: Callback<Rc<RefCell<Option<ViewerCanvasState>>>>,
     #[prop_or_default]
-    pub on_zoom_changed: Callback<(f32, f32, f32)>, // (zoom, canvas_w, canvas_h)
+    pub on_camera_changed: Callback<(f32, f32, f32, f32, f32)>, // (pan_x, pan_y, zoom, canvas_w, canvas_h)
 }
 
 impl PartialEq for ChannelRenderInfo {
@@ -122,6 +124,8 @@ impl Component for ViewerCanvas {
                                         x: 0.0,
                                         y: 0.0,
                                         zoom: 1.0,
+                                        canvas_w: rect.width() as f32,
+                                        canvas_h: rect.height() as f32,
                                         dragging: false,
                                         last_mouse: (0.0, 0.0),
                                     },
@@ -131,8 +135,8 @@ impl Component for ViewerCanvas {
                                     .on_canvas_ready
                                     .emit(self.state.clone());
                                 ctx.props()
-                                    .on_zoom_changed
-                                    .emit((1.0, rect.width() as f32, rect.height() as f32));
+                                    .on_camera_changed
+                                    .emit((0.0, 0.0, 1.0, rect.width() as f32, rect.height() as f32));
                             }
                             Err(e) => log::error!("Renderer init: {}", e),
                         },
@@ -166,8 +170,15 @@ impl Component for ViewerCanvas {
                 false
             }
             ViewerMsg::MouseUp(_) => {
+                let was_dragging;
                 if let Some(ref mut state) = *self.state.borrow_mut() {
+                    was_dragging = state.camera.dragging;
                     state.camera.dragging = false;
+                } else {
+                    was_dragging = false;
+                }
+                if was_dragging {
+                    self.emit_camera_changed(ctx);
                 }
                 false
             }
@@ -192,17 +203,7 @@ impl Component for ViewerCanvas {
 
                     state.camera.zoom = new_zoom;
                 }
-                // Notify app of zoom change for level selection
-                if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
-                    let state_ref = self.state.borrow();
-                    if let Some(ref state) = *state_ref {
-                        ctx.props().on_zoom_changed.emit((
-                            state.camera.zoom,
-                            canvas.width() as f32,
-                            canvas.height() as f32,
-                        ));
-                    }
-                }
+                self.emit_camera_changed(ctx);
                 ctx.link().send_message(ViewerMsg::Redraw);
                 false
             }
@@ -239,6 +240,21 @@ impl Component for ViewerCanvas {
 }
 
 impl ViewerCanvas {
+    fn emit_camera_changed(&self, ctx: &Context<Self>) {
+        if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
+            let state_ref = self.state.borrow();
+            if let Some(ref state) = *state_ref {
+                ctx.props().on_camera_changed.emit((
+                    state.camera.x,
+                    state.camera.y,
+                    state.camera.zoom,
+                    canvas.width() as f32,
+                    canvas.height() as f32,
+                ));
+            }
+        }
+    }
+
     fn redraw(&self, ctx: &Context<Self>) {
         let state_ref = self.state.borrow();
         let state = match state_ref.as_ref() {

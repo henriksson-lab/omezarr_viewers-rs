@@ -33,6 +33,8 @@ pub struct App {
     error: Option<String>,
     current_level: usize,
     tile_generation: u64,
+    tiles_pending: u32,
+    tiles_in_flight: HashSet<TileKey>,
 }
 
 pub enum AppMsg {
@@ -46,7 +48,7 @@ pub enum AppMsg {
     SetChannelOpacity(usize, f32),
     SetZSlice(u32),
     SetTIndex(u32),
-    ZoomChanged(f32, f32, f32), // (zoom, canvas_w, canvas_h)
+    CameraChanged(f32, f32, f32, f32, f32), // (pan_x, pan_y, zoom, canvas_w, canvas_h)
     TileLoaded {
         level: usize,
         channel: usize,
@@ -57,6 +59,7 @@ pub enum AppMsg {
         h: u32,
         generation: u64,
     },
+    TileFailed { generation: u64, key: TileKey },
 }
 
 impl Component for App {
@@ -85,6 +88,8 @@ impl Component for App {
             error: None,
             current_level: 0,
             tile_generation: 0,
+            tiles_pending: 0,
+            tiles_in_flight: HashSet::new(),
         }
     }
 
@@ -157,21 +162,28 @@ impl Component for App {
                 self.load_tiles(ctx);
                 true
             }
-            AppMsg::ZoomChanged(zoom, canvas_w, canvas_h) => {
+            AppMsg::CameraChanged(pan_x, pan_y, zoom, canvas_w, canvas_h) => {
+                let mut level_changed = false;
                 if let Some(ref info) = self.dataset {
                     let new_level = self.pick_level(info, zoom, canvas_w, canvas_h);
                     if new_level != self.current_level {
                         self.current_level = new_level;
-                        self.load_tiles(ctx);
-                        return true;
+                        level_changed = true;
                     }
                 }
-                false
+                if level_changed {
+                    self.load_tiles_fresh(ctx, pan_x, pan_y, zoom, canvas_w, canvas_h);
+                } else {
+                    self.load_visible_tiles(ctx, pan_x, pan_y, zoom, canvas_w, canvas_h);
+                }
+                level_changed
             }
             AppMsg::TileLoaded { level, channel, tile_y, tile_x, data, w, h, generation } => {
                 if generation != self.tile_generation {
-                    return false; // stale tile from old level/z/t
+                    return false;
                 }
+                self.tiles_pending = self.tiles_pending.saturating_sub(1);
+                self.tiles_in_flight.remove(&TileKey { level, tile_y, tile_x, channel });
                 if let Some(cs) = &self.canvas_state {
                     if let Some(ref mut state) = *cs.borrow_mut() {
                         match state.renderer.upload_tile(w, h, &data) {
@@ -179,11 +191,19 @@ impl Component for App {
                                 let key = TileKey { level, tile_y, tile_x, channel };
                                 state.tile_cache.insert(key, tex);
                             }
-                            Err(e) => log::error!("Upload tile: {}", e),
+                            Err(e) => log::warn!("Upload tile: {}", e),
                         }
                     }
                 }
                 true
+            }
+            AppMsg::TileFailed { generation, key } => {
+                if generation != self.tile_generation {
+                    return false;
+                }
+                self.tiles_pending = self.tiles_pending.saturating_sub(1);
+                self.tiles_in_flight.remove(&key);
+                self.tiles_pending > 0
             }
         }
     }
@@ -215,7 +235,7 @@ impl Component for App {
             .collect();
 
         let on_canvas_ready = ctx.link().callback(AppMsg::CanvasReady);
-        let on_zoom_changed = ctx.link().callback(|(z, w, h): (f32, f32, f32)| AppMsg::ZoomChanged(z, w, h));
+        let on_camera_changed = ctx.link().callback(|(px, py, z, w, h): (f32, f32, f32, f32, f32)| AppMsg::CameraChanged(px, py, z, w, h));
 
         html! {
             <div class="app-container">
@@ -223,7 +243,7 @@ impl Component for App {
                     channel_info={channel_infos}
                     dtype_max={self.dtype_max}
                     on_canvas_ready={on_canvas_ready}
-                    on_zoom_changed={on_zoom_changed}
+                    on_camera_changed={on_camera_changed}
                 />
                 <div class="control-panel">
                     <h2>{"Channels"}</h2>
@@ -265,6 +285,7 @@ impl Component for App {
                             }
                             <p>{self.full_size_label(ds)}</p>
                         }
+                        <p>{self.tiles_status()}</p>
                     </div>
                 </div>
             </div>
@@ -273,6 +294,24 @@ impl Component for App {
 }
 
 impl App {
+    fn tiles_status(&self) -> String {
+        let (tile_size, cache_size) = self.canvas_state.as_ref()
+            .and_then(|cs| cs.borrow().as_ref().map(|s| {
+                let ts = s.level_info.get(&s.current_level).map(|li| li.tile_size);
+                (ts, s.tile_cache.len())
+            }))
+            .unwrap_or((None, 0));
+        let size_str = match tile_size {
+            Some((tw, th)) => format!(" ({}x{})", tw as u32, th as u32),
+            None => String::new(),
+        };
+        if self.tiles_pending > 0 {
+            format!("Tiles{}: {} cached, {} pending", size_str, cache_size, self.tiles_pending)
+        } else {
+            format!("Tiles{}: {} cached", size_str, cache_size)
+        }
+    }
+
     fn full_size_label(&self, ds: &DatasetInfo) -> String {
         let axes = &ds.metadata.multiscales[0].axes;
         let full = &ds.arrays[0];
@@ -282,12 +321,35 @@ impl App {
         format!("Full size: {}", dims.join(" \u{00d7} "))
     }
 
-    /// Pick the coarsest pyramid level that still has enough resolution for the screen.
+    /// Pick the coarsest pyramid level where each level-pixel maps to at least 1 screen pixel.
     fn pick_level(&self, info: &DatasetInfo, zoom: f32, canvas_w: f32, canvas_h: f32) -> usize {
         let axes = &info.metadata.multiscales[0].axes;
-        let screen_needed = canvas_w.max(canvas_h) * zoom;
 
-        let mut best = 0usize;
+        // Get full-res image dimensions
+        let full = &info.arrays[0];
+        let mut full_w = 1.0f32;
+        let mut full_h = 1.0f32;
+        for (i, axis) in axes.iter().enumerate() {
+            match axis.name.as_str() {
+                "x" => full_w = full.shape[i] as f32,
+                "y" => full_h = full.shape[i] as f32,
+                _ => {}
+            }
+        }
+
+        // fit = zoom * min(canvas_w/full_w, canvas_h/full_h)
+        // Each full-res pixel occupies `fit` screen pixels.
+        // Each level-pixel corresponds to (full_dim / level_dim) full-res pixels,
+        // so it occupies fit * (full_dim / level_dim) screen pixels.
+        // We want min(fit * full_w/lw, fit * full_h/lh) >= 1.
+        let fit = zoom * (canvas_w / full_w).min(canvas_h / full_h);
+
+        // spp = screen pixels per level pixel. Fine levels have spp << 1 (wasteful),
+        // coarse levels have spp >> 1 (pixelated). We want the coarsest level
+        // where quality is still acceptable. Allow up to 2x undersampling (spp <= 2)
+        // since linear filtering hides mild undersampling.
+        let last = info.arrays.len().saturating_sub(1);
+        let mut best = last;
         for (level, arr) in info.arrays.iter().enumerate() {
             let mut lw = 1.0f32;
             let mut lh = 1.0f32;
@@ -298,9 +360,11 @@ impl App {
                     _ => {}
                 }
             }
-            if lw.max(lh) >= screen_needed {
-                best = level;
+            let spp = (fit * full_w / lw).min(fit * full_h / lh);
+            if spp > 2.0 {
+                break; // too coarse
             }
+            best = level;
         }
         best
     }
@@ -398,20 +462,9 @@ impl App {
         }
     }
 
-    fn load_tiles(&mut self, ctx: &Context<Self>) {
-        let info = match &self.dataset {
-            Some(i) => i.clone(),
-            None => return,
-        };
-
-        let level = self.current_level;
-        let t = self.t_index as u64;
-        let z = self.z_slice as u64;
-
-        let arr = match info.arrays.get(level) {
-            Some(a) => a,
-            None => return,
-        };
+    /// Compute the level's tile grid info for a given level.
+    fn level_tile_info(&self, info: &DatasetInfo, level: usize) -> Option<(u64, u64, u64, u64, u32, u32)> {
+        let arr = info.arrays.get(level)?;
         let axes = &info.metadata.multiscales[0].axes;
         let mut img_w = 1u64;
         let mut img_h = 1u64;
@@ -430,17 +483,117 @@ impl App {
                 _ => {}
             }
         }
-
         let tile_w = chunk_w.max(256).min(2048);
         let tile_h = chunk_h.max(256).min(2048);
         let num_tiles_x = ((img_w + tile_w - 1) / tile_w) as u32;
         let num_tiles_y = ((img_h + tile_h - 1) / tile_h) as u32;
+        Some((img_w, img_h, tile_w, tile_h, num_tiles_x, num_tiles_y))
+    }
 
+    /// Compute which tile indices are visible in the viewport.
+    fn visible_tile_range(
+        &self,
+        pan_x: f32, pan_y: f32, zoom: f32, canvas_w: f32, canvas_h: f32,
+        img_w: f32, img_h: f32, tile_w: f32, tile_h: f32,
+        num_tiles_x: u32, num_tiles_y: u32,
+    ) -> (u32, u32, u32, u32) {
+        // Reverse the vertex shader transform to find visible image pixel range.
+        // fit = zoom * min(canvas_w/img_w, canvas_h/img_h)
+        let fit = zoom * (canvas_w / img_w).min(canvas_h / img_h);
+        let scale_x = fit * img_w / canvas_w;
+        let scale_y = fit * img_h / canvas_h;
+
+        // Screen edges in clip space are -1 and +1.
+        // screen_pos = centered * scale + pan * 2 / canvas
+        // centered = (screen_pos - pan * 2 / canvas) / scale
+        // img_pos = centered / 2 + 0.5
+        // pixel = img_pos * img_size
+        let screen_to_pixel = |clip_x: f32, clip_y: f32| -> (f32, f32) {
+            let cx = (clip_x - pan_x * 2.0 / canvas_w) / scale_x;
+            let cy = (-clip_y - pan_y * 2.0 / canvas_h) / scale_y; // note: y is flipped in shader
+            let px = (cx / 2.0 + 0.5) * img_w;
+            let py = (cy / 2.0 + 0.5) * img_h;
+            (px, py)
+        };
+
+        let (px0, py0) = screen_to_pixel(-1.0, -1.0);
+        let (px1, py1) = screen_to_pixel(1.0, 1.0);
+
+        let min_px = px0.min(px1).max(0.0);
+        let max_px = px0.max(px1).min(img_w);
+        let min_py = py0.min(py1).max(0.0);
+        let max_py = py0.max(py1).min(img_h);
+
+        let tx_min = (min_px / tile_w).floor().max(0.0) as u32;
+        let tx_max = ((max_px / tile_w).ceil() as u32).min(num_tiles_x);
+        let ty_min = (min_py / tile_h).floor().max(0.0) as u32;
+        let ty_max = ((max_py / tile_h).ceil() as u32).min(num_tiles_y);
+
+        (tx_min, tx_max, ty_min, ty_max)
+    }
+
+    /// Called from DatasetLoaded, CanvasReady, SetChannelVisibility, SetZSlice, SetTIndex
+    /// when we don't yet have camera info from the canvas — reads it from canvas state.
+    /// Called when we don't have camera params (e.g. channel toggle, z/t change).
+    /// Reads camera from canvas state; skips if canvas not ready yet.
+    fn load_tiles(&mut self, ctx: &Context<Self>) {
+        let (pan_x, pan_y, zoom, canvas_w, canvas_h) = match &self.canvas_state {
+            Some(cs) => match *cs.borrow() {
+                Some(ref state) => {
+                    let cam = &state.camera;
+                    (cam.x, cam.y, cam.zoom, cam.canvas_w, cam.canvas_h)
+                }
+                None => return,
+            },
+            None => return,
+        };
+        if canvas_w <= 0.0 || canvas_h <= 0.0 {
+            return;
+        }
+        self.load_tiles_fresh(ctx, pan_x, pan_y, zoom, canvas_w, canvas_h);
+    }
+
+    /// Full reload: bump generation, clear counters, invalidate stale in-flight requests.
+    /// Called on level/z/t/channel changes.
+    fn load_tiles_fresh(&mut self, ctx: &Context<Self>,
+        pan_x: f32, pan_y: f32, zoom: f32, canvas_w: f32, canvas_h: f32,
+    ) {
         self.tile_generation += 1;
+        self.tiles_pending = 0;
+        self.tiles_in_flight.clear();
+        self.load_visible_tiles(ctx, pan_x, pan_y, zoom, canvas_w, canvas_h);
+    }
+
+    /// Fetch tiles for the visible viewport. Does NOT bump generation — in-flight
+    /// requests from earlier calls within the same generation remain valid.
+    fn load_visible_tiles(
+        &mut self, ctx: &Context<Self>,
+        pan_x: f32, pan_y: f32, zoom: f32, canvas_w: f32, canvas_h: f32,
+    ) {
+        let info = match &self.dataset {
+            Some(i) => i.clone(),
+            None => return,
+        };
+
+        let level = self.current_level;
+        let t = self.t_index as u64;
+        let z = self.z_slice as u64;
         let gen = self.tile_generation;
 
-        // Register level info and set current level on canvas state.
-        // Evict cached tiles from levels other than current and its fallbacks.
+        let (img_w, img_h, tile_w, tile_h, num_tiles_x, num_tiles_y) =
+            match self.level_tile_info(&info, level) {
+                Some(v) => v,
+                None => return,
+            };
+
+        // Compute visible tile range
+        let (tx_min, tx_max, ty_min, ty_max) = self.visible_tile_range(
+            pan_x, pan_y, zoom, canvas_w, canvas_h,
+            img_w as f32, img_h as f32, tile_w as f32, tile_h as f32,
+            num_tiles_x, num_tiles_y,
+        );
+
+        // Update canvas state
         if let Some(cs) = &self.canvas_state {
             if let Some(ref mut state) = *cs.borrow_mut() {
                 state.level_info.insert(level, LevelTileInfo {
@@ -451,13 +604,20 @@ impl App {
                 });
                 state.current_level = level;
 
-                // Keep only current level and coarser levels (potential fallbacks)
+                // Keep current level + coarser fallbacks; evict finer levels
                 let keep_levels: HashSet<usize> = state.level_info.keys()
                     .copied()
                     .filter(|&l| l >= level)
                     .collect();
                 state.tile_cache.retain(|k, _| keep_levels.contains(&k.level));
                 state.level_info.retain(|l, _| keep_levels.contains(l));
+
+                // Evict off-screen tiles from current level
+                state.tile_cache.retain(|k, _| {
+                    if k.level != level { return true; }
+                    k.tile_x >= tx_min && k.tile_x < tx_max &&
+                    k.tile_y >= ty_min && k.tile_y < ty_max
+                });
             }
         }
 
@@ -469,32 +629,47 @@ impl App {
             .map(|(i, _)| i)
             .collect();
 
-        for ty in 0..num_tiles_y as u64 {
-            for tx in 0..num_tiles_x as u64 {
-                let y_start = ty * tile_h;
-                let x_start = tx * tile_w;
+        // Only fetch visible tiles that aren't already cached
+        for ty in ty_min..ty_max {
+            for tx in tx_min..tx_max {
+                let y_start = ty as u64 * tile_h;
+                let x_start = tx as u64 * tile_w;
                 let h = tile_h.min(img_h - y_start);
                 let w = tile_w.min(img_w - x_start);
 
                 for &ch_idx in &visible_channels {
+                    let key = TileKey { level, tile_y: ty, tile_x: tx, channel: ch_idx };
+
+                    // Skip if already cached or already in-flight
+                    let already_cached = self.canvas_state.as_ref()
+                        .and_then(|cs| cs.borrow().as_ref().map(|s| {
+                            s.tile_cache.contains_key(&key)
+                        }))
+                        .unwrap_or(false);
+                    if already_cached || self.tiles_in_flight.contains(&key) {
+                        continue;
+                    }
+
+                    self.tiles_in_flight.insert(key);
+                    self.tiles_pending += 1;
                     let link = ctx.link().clone();
-                    let ty32 = ty as u32;
-                    let tx32 = tx as u32;
                     spawn_local(async move {
                         match api_client::fetch_tile(level, t, ch_idx as u64, z, y_start, x_start, h, w).await {
                             Ok(data) => {
                                 link.send_message(AppMsg::TileLoaded {
                                     level,
                                     channel: ch_idx,
-                                    tile_y: ty32,
-                                    tile_x: tx32,
+                                    tile_y: ty,
+                                    tile_x: tx,
                                     data,
                                     w: w as u32,
                                     h: h as u32,
                                     generation: gen,
                                 });
                             }
-                            Err(e) => log::error!("Tile ({},{}) ch {}: {}", ty, tx, ch_idx, e),
+                            Err(_) => {
+                                link.send_message(AppMsg::TileFailed { generation: gen, key });
+                            }
                         }
                     });
                 }
