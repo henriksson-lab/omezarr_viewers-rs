@@ -20,8 +20,9 @@ void main() {
     // Apply pan and zoom to get clip space coords
     // Center the image: (0,0) in image space maps to center of screen
     vec2 centered = (img_pos - 0.5) * 2.0;  // -1..1
-    vec2 aspect = vec2(u_image_size.x / u_canvas_size.x, u_image_size.y / u_canvas_size.y);
-    float scale = u_zoom * min(u_canvas_size.x / u_image_size.x, u_canvas_size.y / u_image_size.y);
+    float fit = u_zoom * min(u_canvas_size.x / u_image_size.x, u_canvas_size.y / u_image_size.y);
+    vec2 scale = vec2(fit * u_image_size.x / u_canvas_size.x,
+                      fit * u_image_size.y / u_canvas_size.y);
     vec2 screen_pos = (centered * scale) + u_pan * 2.0 / u_canvas_size;
 
     gl_Position = vec4(screen_pos.x, -screen_pos.y, 0.0, 1.0);
