@@ -348,8 +348,7 @@ impl App {
         // coarse levels have spp >> 1 (pixelated). We want the coarsest level
         // where quality is still acceptable. Allow up to 2x undersampling (spp <= 2)
         // since linear filtering hides mild undersampling.
-        let last = info.arrays.len().saturating_sub(1);
-        let mut best = last;
+        let mut best = 0; // default to finest if none are coarse enough
         for (level, arr) in info.arrays.iter().enumerate() {
             let mut lw = 1.0f32;
             let mut lh = 1.0f32;
