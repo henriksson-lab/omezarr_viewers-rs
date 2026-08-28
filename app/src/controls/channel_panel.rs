@@ -130,28 +130,28 @@ pub fn channel_panel(props: &ChannelPanelProps) -> Html {
             </div>
             if props.visible {
                 <div class="slider-row">
-                    <label>{"Min"}</label>
-                    <input
-                        type="range"
-                        min="0"
-                        max={props.contrast_limit.to_string()}
-                        step="1"
-                        value={props.contrast_min.to_string()}
-                        oninput={on_cmin}
-                    />
-                    <span class="value">{format!("{:.0}", props.contrast_min)}</span>
-                </div>
-                <div class="slider-row">
-                    <label>{"Max"}</label>
-                    <input
-                        type="range"
-                        min="0"
-                        max={props.contrast_limit.to_string()}
-                        step="1"
-                        value={props.contrast_max.to_string()}
-                        oninput={on_cmax}
-                    />
-                    <span class="value">{format!("{:.0}", props.contrast_max)}</span>
+                    <label>{"Contrast"}</label>
+                    <div class="dual-range">
+                        <input
+                            type="range"
+                            min="0"
+                            max={props.contrast_limit.to_string()}
+                            step="1"
+                            value={props.contrast_min.to_string()}
+                            oninput={on_cmin}
+                            class="dual-range-min"
+                        />
+                        <input
+                            type="range"
+                            min="0"
+                            max={props.contrast_limit.to_string()}
+                            step="1"
+                            value={props.contrast_max.to_string()}
+                            oninput={on_cmax}
+                            class="dual-range-max"
+                        />
+                    </div>
+                    <span class="value">{format!("{:.0}-{:.0}", props.contrast_min, props.contrast_max)}</span>
                 </div>
                 <div class="slider-row">
                     <label>{"Opacity"}</label>

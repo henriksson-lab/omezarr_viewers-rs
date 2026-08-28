@@ -134,6 +134,81 @@ body {
     color: #888;
 }
 
+.dual-range {
+    flex: 1;
+    position: relative;
+    height: 20px;
+}
+
+.dual-range input[type="range"] {
+    position: absolute;
+    width: 100%;
+    top: 0;
+    height: 20px;
+    margin: 0;
+    padding: 0;
+    pointer-events: none;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+}
+
+.dual-range .dual-range-min {
+    z-index: 1;
+}
+
+.dual-range .dual-range-max {
+    z-index: 2;
+}
+
+/* Track — only show on the bottom (min) slider */
+.dual-range .dual-range-min::-webkit-slider-runnable-track {
+    height: 4px;
+    background: #333;
+    border-radius: 2px;
+}
+
+.dual-range .dual-range-max::-webkit-slider-runnable-track {
+    height: 4px;
+    background: transparent;
+    border-radius: 2px;
+}
+
+.dual-range .dual-range-min::-moz-range-track {
+    height: 4px;
+    background: #333;
+    border-radius: 2px;
+}
+
+.dual-range .dual-range-max::-moz-range-track {
+    height: 4px;
+    background: transparent;
+    border-radius: 2px;
+}
+
+/* Thumbs — both need pointer-events */
+.dual-range input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #e94560;
+    cursor: pointer;
+    pointer-events: auto;
+    margin-top: -5px;
+}
+
+.dual-range input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #e94560;
+    cursor: pointer;
+    pointer-events: auto;
+    border: none;
+}
+
 .color-picker {
     width: 24px;
     height: 24px;
