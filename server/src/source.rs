@@ -77,8 +77,29 @@ impl SourceSpec {
 
     /// A short name for the layer list: the last path component.
     pub fn short_name(&self) -> String {
-        let full = match self {
-            SourceSpec::File(path) => path.to_string_lossy().to_string(),
+        let full = self.text();
+        full.trim_end_matches(is_separator)
+            .rsplit(is_separator)
+            .find(|part| !part.is_empty())
+            .unwrap_or("layer")
+            .to_string()
+    }
+
+    /// The file extension, lowercased, when the source names a file.
+    pub fn extension(&self) -> Option<String> {
+        let full = self.text();
+        let name = full
+            .trim_end_matches(is_separator)
+            .rsplit(is_separator)
+            .next()?;
+        let ext = name.rsplit_once('.')?.1;
+        Some(ext.to_ascii_lowercase())
+    }
+
+    /// The source as text, for the two questions above.
+    fn text(&self) -> String {
+        match self {
+            SourceSpec::File(path) => path.to_string_lossy().into_owned(),
             SourceSpec::Http(url) => url.clone(),
             SourceSpec::S3 { bucket, key, .. } => {
                 if key.is_empty() {
@@ -87,25 +108,14 @@ impl SourceSpec {
                     key.clone()
                 }
             }
-        };
-        full.trim_end_matches('/')
-            .rsplit('/')
-            .find(|part| !part.is_empty())
-            .unwrap_or("layer")
-            .to_string()
+        }
     }
+}
 
-    /// The file extension, lowercased, when the source names a file.
-    pub fn extension(&self) -> Option<String> {
-        let full = match self {
-            SourceSpec::File(path) => path.to_string_lossy().to_string(),
-            SourceSpec::Http(url) => url.clone(),
-            SourceSpec::S3 { key, .. } => key.clone(),
-        };
-        let name = full.trim_end_matches('/').rsplit('/').next()?;
-        let ext = name.rsplit_once('.')?.1;
-        Some(ext.to_ascii_lowercase())
-    }
+/// Both path separators, because a source can be a Windows path or a URI and
+/// the last component is wanted either way.
+fn is_separator(c: char) -> bool {
+    c == '/' || c == '\\'
 }
 
 /// Credentials and endpoint for one S3-compatible service.
@@ -284,6 +294,13 @@ mod tests {
             assert_eq!(spec.uri(), uri);
             assert_eq!(SourceSpec::parse(&spec.uri()).unwrap(), spec);
         }
+    }
+
+    #[test]
+    fn a_windows_path_still_has_a_last_component() {
+        let spec = SourceSpec::parse(r"C:\\data\\run\\filled.npy").unwrap();
+        assert_eq!(spec.short_name(), "filled.npy");
+        assert_eq!(spec.extension().as_deref(), Some("npy"));
     }
 
     #[test]

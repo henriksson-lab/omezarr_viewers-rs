@@ -53,10 +53,10 @@ pub struct Project {
 impl Project {
     /// Read a project file, resolving relative sources against its directory.
     pub fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let mut project: Project = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut project: Project =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         let base = path.parent().unwrap_or(Path::new("."));
         for layer in &mut project.layers {
             layer.source = resolve(base, &layer.source);
@@ -133,12 +133,16 @@ impl Project {
 }
 
 /// One project layer for a discovered file, named by its path inside the run.
+///
+/// The name is always written with `/`, whatever the host's separator is: it is
+/// shown in the layer list and saved into project files, and a view saved on
+/// Windows should read the same everywhere.
 fn layer(root: &Path, path: PathBuf, role: Option<&str>) -> ProjectLayer {
     let name = path
         .strip_prefix(root)
         .unwrap_or(&path)
         .to_string_lossy()
-        .into_owned();
+        .replace('\\', "/");
     ProjectLayer {
         source: path.to_string_lossy().into_owned(),
         role: role.map(str::to_string),
@@ -162,8 +166,8 @@ fn walk(
     volumes: &mut Vec<PathBuf>,
     objects: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let entries = std::fs::read_dir(directory)
-        .with_context(|| format!("reading {}", directory.display()))?;
+    let entries =
+        std::fs::read_dir(directory).with_context(|| format!("reading {}", directory.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -172,7 +176,10 @@ fn walk(
         }
         if path.is_dir() {
             // A `.zarr` directory is a store, not a directory to walk into.
-            if name.ends_with(".zarr") || path.join("zarr.json").exists() || path.join(".zattrs").exists() {
+            if name.ends_with(".zarr")
+                || path.join("zarr.json").exists()
+                || path.join(".zattrs").exists()
+            {
                 images.push(path);
             } else if depth < MAX_DEPTH {
                 walk(&path, depth + 1, images, volumes, objects)?;
@@ -217,7 +224,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let root = dir.path();
         // The layout `clearmap-ng`'s `Workspace` writes.
-        for asset in ["binary/ch0/filled.npy", "binary/ch0/final.npy", "skeleton/ch0/skeleton.npy"] {
+        for asset in [
+            "binary/ch0/filled.npy",
+            "binary/ch0/final.npy",
+            "skeleton/ch0/skeleton.npy",
+        ] {
             let path = root.join(asset);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"").unwrap();

@@ -154,7 +154,12 @@ impl Renderer {
     }
 
     /// Upload float32 pixel data as an R32F texture.
-    pub fn upload_tile(&self, width: u32, height: u32, data: &[f32]) -> Result<TileTexture, String> {
+    pub fn upload_tile(
+        &self,
+        width: u32,
+        height: u32,
+        data: &[f32],
+    ) -> Result<TileTexture, String> {
         let gl = &self.ctx.gl;
 
         let texture = gl.create_texture().ok_or("Failed to create texture")?;
@@ -445,7 +450,9 @@ impl Renderer {
     /// one buffer, one draw call for the whole layer.
     pub fn upload_points(&self, data: &[f32]) -> Result<PointBuffer, String> {
         let gl = &self.ctx.gl;
-        let vao = gl.create_vertex_array().ok_or("Failed to create point VAO")?;
+        let vao = gl
+            .create_vertex_array()
+            .ok_or("Failed to create point VAO")?;
         let buffer = gl.create_buffer().ok_or("Failed to create point buffer")?;
         gl.bind_vertex_array(Some(&vao));
         gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));

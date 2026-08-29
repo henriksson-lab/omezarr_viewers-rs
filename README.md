@@ -108,6 +108,19 @@ make dev-app          # watch-rebuild the frontend
 make dev-server       # watch-rebuild the server
 ```
 
+## Continuous integration
+
+| Workflow | When | What |
+|---|---|---|
+| `ci.yml` | push to `main`, PRs, manual | server tests, `clippy -D warnings` on server and frontend, `cargo fmt --check`, and a desktop build — on Linux, macOS and Windows |
+| `release.yml` | a `v*` tag, or manual | desktop bundles for all three platforms; a tag attaches them to a **draft** release, a manual run just keeps them as artifacts |
+
+Both build the WASM frontend first: the desktop binary compiles it in, so a
+missing `dist/` is a build failure rather than a run-time surprise.
+
+`desktop/gen/schemas/` is not committed — Tauri regenerates it on every build
+and writes a different set per platform.
+
 ## Architecture
 
 A Cargo workspace of four crates:

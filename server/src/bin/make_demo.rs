@@ -4,7 +4,10 @@
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "make-demo", about = "Write a synthetic OME-Zarr image + labels")]
+#[command(
+    name = "make-demo",
+    about = "Write a synthetic OME-Zarr image + labels"
+)]
 struct Cli {
     /// Directory to write `image.zarr` and `labels.zarr` into.
     out: std::path::PathBuf,

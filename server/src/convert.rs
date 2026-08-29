@@ -71,8 +71,7 @@ pub fn npy_to_zarr(
     if output.exists() {
         bail!("{} already exists", output.display());
     }
-    std::fs::create_dir_all(output)
-        .with_context(|| format!("creating {}", output.display()))?;
+    std::fs::create_dir_all(output).with_context(|| format!("creating {}", output.display()))?;
     let store = Arc::new(
         FilesystemStore::new(output)
             .with_context(|| format!("opening {} as a store", output.display()))?,
@@ -205,7 +204,9 @@ fn write_level(
     let array = ArrayBuilder::new(
         shape.to_vec(),
         data_type,
-        chunk_shape.try_into().map_err(|e| anyhow::anyhow!("{e:?}"))?,
+        chunk_shape
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?,
         fill_value_of(dtype)?,
     )
     .build(store.clone(), &format!("/{path}"))
@@ -213,12 +214,8 @@ fn write_level(
     array.store_metadata().context("writing array metadata")?;
 
     for (z, plane) in planes.iter().enumerate() {
-        let subset = ArraySubset::new_with_ranges(&[
-            0..1,
-            z as u64..z as u64 + 1,
-            0..shape[2],
-            0..shape[3],
-        ]);
+        let subset =
+            ArraySubset::new_with_ranges(&[0..1, z as u64..z as u64 + 1, 0..shape[2], 0..shape[3]]);
         store_plane(&array, &subset, dtype, plane)?;
     }
     Ok(())

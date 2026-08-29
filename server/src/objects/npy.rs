@@ -44,7 +44,10 @@ impl Field {
         if !matches!(kind, 'u' | 'i' | 'f') {
             bail!("dtype `{descr}` is not a number this reads");
         }
-        if !matches!((kind, width), ('f', 4) | ('f', 8) | (_, 1) | (_, 2) | (_, 4) | (_, 8)) {
+        if !matches!(
+            (kind, width),
+            ('f', 4) | ('f', 8) | (_, 1) | (_, 2) | (_, 4) | (_, 8)
+        ) {
             bail!("dtype `{descr}` has a width this does not read");
         }
         Ok(Self {
@@ -106,11 +109,7 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
 }
 
 /// A plain `(N, k)` array: the first columns are the position.
-fn plain(
-    field: &Field,
-    shape: &[usize],
-    data: &[u8],
-) -> Result<(Vec<[f32; 3]>, Vec<NamedColumn>)> {
+fn plain(field: &Field, shape: &[usize], data: &[u8]) -> Result<(Vec<[f32; 3]>, Vec<NamedColumn>)> {
     let (rows, width) = match shape {
         [rows, width] => (*rows, *width),
         [rows] => (*rows, 1),
@@ -213,7 +212,9 @@ fn structured(
     let columns = fields
         .iter()
         .enumerate()
-        .filter(|(index, _)| Some(*index) != Some(x) && Some(*index) != Some(y) && Some(*index) != z)
+        .filter(|(index, _)| {
+            Some(*index) != Some(x) && Some(*index) != Some(y) && Some(*index) != z
+        })
         .map(|(index, field)| NamedColumn {
             name: field.name.clone(),
             data: column_data(field.is_integral(), values[index].clone()),
@@ -237,10 +238,7 @@ fn split_header(bytes: &[u8]) -> Result<(String, &[u8])> {
     }
     let major = bytes[6];
     let (header_len, start) = if major == 1 {
-        (
-            u16::from_le_bytes([bytes[8], bytes[9]]) as usize,
-            10usize,
-        )
+        (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10usize)
     } else {
         (
             u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,

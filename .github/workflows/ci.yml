@@ -1,0 +1,108 @@
+# Build, test and lint on the three platforms the app ships to.
+#
+# The desktop crate compiles the frontend into itself, so every job builds the
+# WASM bundle first: `cargo build -p omezarr-viewer-desktop` fails without
+# `dist/`, and that is the failure mode this catches early rather than at
+# release time.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Windows runners default to PowerShell, where `mkdir -p` is not a flag and a
+# `&&` chain is not a chain. One shell everywhere means one set of steps.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform's failure should not hide the others': a path-separator bug
+      # shows up on Windows alone, and cancelling the rest would hide whether it
+      # is the only one.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+          - name: macos
+            os: macos-latest
+          - name: windows
+            os: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The desktop crate is the expensive one and it is not in
+          # `default-members`, so name the workspace explicitly.
+          workspaces: ". -> target"
+          cache-all-crates: true
+
+      # Tauri's Linux dependencies. macOS and Windows use the system webview.
+      - name: Install the Linux webview dependencies
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            patchelf \
+            build-essential \
+            curl wget file libssl-dev libxdo-dev
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Build the frontend
+        run: |
+          mkdir -p app/assets
+          cd app && trunk build --release
+
+      - name: Test the server
+        run: cargo test -p server
+
+      - name: Lint the server
+        run: cargo clippy -p server --all-targets -- -D warnings
+
+      - name: Lint the frontend
+        working-directory: app
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Build the desktop app
+        run: cargo build -p omezarr-viewer-desktop
+
+  # The check that the *pictures* are right lives outside CI: it drives a real
+  # browser over CDP (see CLAUDE.md). What CI can say cheaply is that the
+  # shaders compile at all, which a headless run does prove.
+  formatting:
+    name: formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check

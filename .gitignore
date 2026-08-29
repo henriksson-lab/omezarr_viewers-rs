@@ -1,2 +1,8 @@
 target/
 dist/
+
+# Tauri writes these on every build, and writes a *different* set per platform
+# (`linux-schema.json` here, `macOS-schema.json` on a Mac). Committing them
+# would make every CI runner dirty the tree; `capabilities/default.json` refers
+# to one only so an editor can autocomplete it.
+desktop/gen/schemas/

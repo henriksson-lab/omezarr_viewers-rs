@@ -1,6 +1,6 @@
 use gloo_net::http::Request;
-use wasm_bindgen::JsCast;
 use omezarr_viewer_common::{DatasetInfo, SessionInfo};
+use wasm_bindgen::JsCast;
 
 /// Derive the API base URL from the current browser location.
 fn get_host_url() -> String {
@@ -196,9 +196,7 @@ pub fn ids_from_bytes(bytes: &[u8], dtype: &str) -> Result<Vec<u32>, String> {
             let ids: Vec<u32> = bytes
                 .chunks_exact(8)
                 .map(|c| {
-                    let wide = u64::from_le_bytes([
-                        c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
-                    ]);
+                    let wide = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
                     if wide > u32::MAX as u64 {
                         overflowed = true;
                     }
@@ -336,7 +334,9 @@ pub fn decode_objects(bytes: &[u8]) -> Result<ObjectBatch, String> {
     };
     let version = read_u32(4);
     if version != 1 {
-        return Err(format!("object buffer version {version} is not readable here"));
+        return Err(format!(
+            "object buffer version {version} is not readable here"
+        ));
     }
     let count = read_u32(8) as usize;
     let column_count = read_u32(12) as usize;
@@ -501,8 +501,8 @@ pub async fn download_project() -> Result<(), String> {
         .ok_or("no document")?;
     let parts = js_sys::Array::new();
     parts.push(&wasm_bindgen::JsValue::from_str(&text));
-    let blob = web_sys::Blob::new_with_str_sequence(&parts)
-        .map_err(|e| format!("blob: {:?}", e))?;
+    let blob =
+        web_sys::Blob::new_with_str_sequence(&parts).map_err(|e| format!("blob: {:?}", e))?;
     let href = web_sys::Url::create_object_url_with_blob(&blob)
         .map_err(|e| format!("object url: {:?}", e))?;
 

@@ -9,7 +9,9 @@ use crate::ontology::{Ontology, RegionCount};
 use crate::project::{Project, ProjectLayer};
 use crate::session::{LayerRole, Session};
 use crate::source::{SourceRegistry, SourceSpec};
-use crate::zarr_reader::{self, PlaneAxis, PlaneRequest, Projection, S3Config, TileEncoding, TileRequest};
+use crate::zarr_reader::{
+    self, PlaneAxis, PlaneRequest, Projection, S3Config, TileEncoding, TileRequest,
+};
 
 /// Shared application state: the open session, how sources are resolved, and
 /// the tile cache.
@@ -141,11 +143,7 @@ pub async fn tile(data: web::Data<AppState>, query: web::Query<TileQuery>) -> im
 }
 
 /// The dtype a cached tile is in, without re-reading it.
-fn wire_dtype(
-    store: &crate::volume::Volume,
-    level: usize,
-    encoding: TileEncoding,
-) -> String {
+fn wire_dtype(store: &crate::volume::Volume, level: usize, encoding: TileEncoding) -> String {
     match encoding {
         TileEncoding::F32 => "float32".to_string(),
         TileEncoding::Raw => store
@@ -281,11 +279,17 @@ pub struct ValueQuery {
 /// GPU keeps the client from having to hold every label tile in memory, and it
 /// is one cached 1x1 read.
 #[get("/api/value")]
-pub async fn voxel_value(data: web::Data<AppState>, query: web::Query<ValueQuery>) -> impl Responder {
+pub async fn voxel_value(
+    data: web::Data<AppState>,
+    query: web::Query<ValueQuery>,
+) -> impl Responder {
     let q = query.into_inner();
     let store = {
         let session = data.session.read().await;
-        match session.resolve(q.layer.as_deref()).and_then(|l| l.data.store()) {
+        match session
+            .resolve(q.layer.as_deref())
+            .and_then(|l| l.data.store())
+        {
             Some(store) => store.clone(),
             None => return HttpResponse::NotFound().body("No such layer"),
         }
@@ -524,7 +528,10 @@ pub async fn regions(data: web::Data<AppState>, query: web::Query<RegionsQuery>)
         by_plane
             .entry(z.min(label_z.saturating_sub(1)))
             .or_default()
-            .push((y.min(label_y.saturating_sub(1)), x.min(label_x.saturating_sub(1))));
+            .push((
+                y.min(label_y.saturating_sub(1)),
+                x.min(label_x.saturating_sub(1)),
+            ));
     }
 
     let mut counts: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
@@ -677,18 +684,12 @@ pub async fn save_project(data: web::Data<AppState>) -> impl Responder {
             offset: None,
         })
         .collect();
-    HttpResponse::Ok().json(Project {
-        name: None,
-        layers,
-    })
+    HttpResponse::Ok().json(Project { name: None, layers })
 }
 
 /// Handle POST /api/project — replace the session with a project's layers.
 #[post("/api/project")]
-pub async fn open_project(
-    data: web::Data<AppState>,
-    body: web::Json<Project>,
-) -> impl Responder {
+pub async fn open_project(data: web::Data<AppState>, body: web::Json<Project>) -> impl Responder {
     let wanted = body.into_inner();
     let mut session = data.session.write().await;
     session.clear();
@@ -758,7 +759,10 @@ pub async fn add_layer(data: web::Data<AppState>, body: web::Json<AddLayer>) -> 
         Err(e) => return HttpResponse::BadRequest().body(format!("bad scale/offset: {e:#}")),
     };
     let mut session = data.session.write().await;
-    match session.add(&data.registry, spec, role, body.name, space).await {
+    match session
+        .add(&data.registry, spec, role, body.name, space)
+        .await
+    {
         Ok(id) => {
             log::info!("Added layer {id}");
             HttpResponse::Ok().json(session.info())

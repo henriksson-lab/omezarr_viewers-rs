@@ -18,6 +18,9 @@ clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
 log = "0.4"
 mime_guess = "2"
-rust-embed = "8"
+# `debug-embed`: without it a debug build reads `../dist` off disk at run time,
+# so the binary works from the repository root and nowhere else. The bundle is
+# the app; it must carry the frontend in both profiles.
+rust-embed = { version = "8", features = ["debug-embed"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["sync"] }

@@ -108,9 +108,7 @@ impl NpyVolume {
             Some(op) => {
                 let key = match spec {
                     SourceSpec::S3 { .. } => String::new(),
-                    SourceSpec::Http(url) => {
-                        url.rsplit('/').next().unwrap_or_default().to_string()
-                    }
+                    SourceSpec::Http(url) => url.rsplit('/').next().unwrap_or_default().to_string(),
                     SourceSpec::File(_) => unreachable!("file sources have no operator"),
                 };
                 let data = op
@@ -124,8 +122,8 @@ impl NpyVolume {
 
     /// Open a local `.npy`, memory-mapped.
     pub fn open_local(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let file =
+            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
         // SAFETY: the same guarantee every mmap-backed reader makes — the file
         // must not be truncated under us. These are pipeline outputs, written
         // once and then read.
@@ -209,10 +207,7 @@ impl NpyVolume {
             }
             // Past the right edge, pad with zeros rather than shortening the
             // tile: the client's texture upload wants the shape it asked for.
-            out.resize(
-                out.len() + ((w - columns) as usize) * self.width,
-                0,
-            );
+            out.resize(out.len() + ((w - columns) as usize) * self.width, 0);
         }
         self.to_little_endian(out)
     }
@@ -382,7 +377,10 @@ fn header_span(bytes: &[u8]) -> Result<(String, usize)> {
     if bytes.len() < end {
         bail!("the .npy header runs past the end of the file");
     }
-    Ok((String::from_utf8_lossy(&bytes[start..end]).into_owned(), end))
+    Ok((
+        String::from_utf8_lossy(&bytes[start..end]).into_owned(),
+        end,
+    ))
 }
 
 fn header_text(bytes: &[u8]) -> Result<String> {

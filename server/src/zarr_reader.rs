@@ -10,9 +10,7 @@
 //! viewer asks for tiles from the same level thousands of times in a row.
 
 use anyhow::{Context, Result};
-use omezarr_viewer_common::{
-    ArrayInfo, DatasetInfo, DatasetMetadata, Multiscale, OmeroMetadata,
-};
+use omezarr_viewer_common::{ArrayInfo, DatasetInfo, DatasetMetadata, Multiscale, OmeroMetadata};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use zarrs::array::Array;
@@ -754,13 +752,34 @@ mod tests {
     fn every_supported_dtype_converts() {
         assert_eq!(bytes_to_f32(&[7], "uint8").unwrap(), vec![7.0]);
         assert_eq!(bytes_to_f32(&[0xff], "int8").unwrap(), vec![-1.0]);
-        assert_eq!(bytes_to_f32(&1234u16.to_le_bytes(), "uint16").unwrap(), vec![1234.0]);
-        assert_eq!(bytes_to_f32(&(-5i16).to_le_bytes(), "int16").unwrap(), vec![-5.0]);
-        assert_eq!(bytes_to_f32(&70000u32.to_le_bytes(), "uint32").unwrap(), vec![70000.0]);
-        assert_eq!(bytes_to_f32(&(-9i32).to_le_bytes(), "int32").unwrap(), vec![-9.0]);
-        assert_eq!(bytes_to_f32(&5u64.to_le_bytes(), "uint64").unwrap(), vec![5.0]);
-        assert_eq!(bytes_to_f32(&1.5f32.to_le_bytes(), "float32").unwrap(), vec![1.5]);
-        assert_eq!(bytes_to_f32(&2.5f64.to_le_bytes(), "float64").unwrap(), vec![2.5]);
+        assert_eq!(
+            bytes_to_f32(&1234u16.to_le_bytes(), "uint16").unwrap(),
+            vec![1234.0]
+        );
+        assert_eq!(
+            bytes_to_f32(&(-5i16).to_le_bytes(), "int16").unwrap(),
+            vec![-5.0]
+        );
+        assert_eq!(
+            bytes_to_f32(&70000u32.to_le_bytes(), "uint32").unwrap(),
+            vec![70000.0]
+        );
+        assert_eq!(
+            bytes_to_f32(&(-9i32).to_le_bytes(), "int32").unwrap(),
+            vec![-9.0]
+        );
+        assert_eq!(
+            bytes_to_f32(&5u64.to_le_bytes(), "uint64").unwrap(),
+            vec![5.0]
+        );
+        assert_eq!(
+            bytes_to_f32(&1.5f32.to_le_bytes(), "float32").unwrap(),
+            vec![1.5]
+        );
+        assert_eq!(
+            bytes_to_f32(&2.5f64.to_le_bytes(), "float64").unwrap(),
+            vec![2.5]
+        );
         assert!(bytes_to_f32(&[0], "complex64").is_err());
     }
 

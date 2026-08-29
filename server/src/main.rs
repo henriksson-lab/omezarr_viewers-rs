@@ -136,7 +136,13 @@ async fn main() -> std::io::Result<()> {
         log::info!("Opening store: {source}");
         let spec = SourceSpec::parse(source).expect("invalid --store");
         session
-            .add(&registry, spec, LayerRole::Auto, None, ObjectSpace::default())
+            .add(
+                &registry,
+                spec,
+                LayerRole::Auto,
+                None,
+                ObjectSpace::default(),
+            )
             .await
             .expect("Failed to open zarr store");
     }
@@ -151,7 +157,12 @@ async fn main() -> std::io::Result<()> {
     }
 
     for layer in session.layers() {
-        log::info!("Layer {} `{}` <- {}", layer.id, layer.name, layer.spec.uri());
+        log::info!(
+            "Layer {} `{}` <- {}",
+            layer.id,
+            layer.name,
+            layer.spec.uri()
+        );
         if let Some(store) = layer.data.store() {
             let info = store.metadata();
             if let Some(omero) = &info.metadata.omero {
@@ -166,9 +177,10 @@ async fn main() -> std::io::Result<()> {
         log::info!("No layers open; use the UI to select a dataset");
     }
 
-    let ontology = cli.ontology.as_ref().map(|path| {
-        std::sync::Arc::new(Ontology::read(path).expect("reading the ontology"))
-    });
+    let ontology = cli
+        .ontology
+        .as_ref()
+        .map(|path| std::sync::Arc::new(Ontology::read(path).expect("reading the ontology")));
 
     let data = web::Data::new(AppState {
         session: RwLock::new(session),

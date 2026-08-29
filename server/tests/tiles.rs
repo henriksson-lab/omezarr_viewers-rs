@@ -205,8 +205,11 @@ async fn a_session_resolves_named_and_default_layers() {
 async fn an_object_source_becomes_an_object_layer() {
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("spots.csv");
-    std::fs::write(&path, "id,x,y,confidence,class\n1,10,20,0.9,0\n2,30,40,0.5,1\n")
-        .expect("write csv");
+    std::fs::write(
+        &path,
+        "id,x,y,confidence,class\n1,10,20,0.9,0\n2,30,40,0.5,1\n",
+    )
+    .expect("write csv");
 
     let registry = SourceRegistry::new();
     let mut session = Session::new();
@@ -367,7 +370,10 @@ async fn orthogonal_planes_hold_the_axes_they_claim() {
         .expect("x plane");
     assert_eq!((plane.height, plane.width), (SHAPE[1], SHAPE[2]));
     let pixels = f32_tile(&plane.bytes);
-    assert_eq!(pixels[(2 * SHAPE[2] + 3) as usize], value_at(1, 2, 3, 7) as f32);
+    assert_eq!(
+        pixels[(2 * SHAPE[2] + 3) as usize],
+        value_at(1, 2, 3, 7) as f32
+    );
 
     // And a z plane is the ordinary view, full size.
     let plane = store

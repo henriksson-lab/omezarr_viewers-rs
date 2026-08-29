@@ -62,12 +62,7 @@ fn write_offset(dtype: &str, shape: [u64; 4], offset: u64) -> Fixture {
     let datasets = [("0", 1u64), ("1", 2u64)];
     let mut dataset_meta = Vec::new();
     for (path, step) in datasets {
-        let level_shape = [
-            shape[0],
-            shape[1],
-            shape[2] / step,
-            shape[3] / step,
-        ];
+        let level_shape = [shape[0], shape[1], shape[2] / step, shape[3] / step];
         write_level(&store, path, dtype, level_shape, step, offset);
         dataset_meta.push(serde_json::json!({
             "path": path,
@@ -143,14 +138,9 @@ fn write_level(
         other => panic!("fixture has no writer for dtype {other}"),
     };
     let chunk = vec![1, 1, shape[2].min(8), shape[3].min(8)];
-    let array = ArrayBuilder::new(
-        shape.to_vec(),
-        data_type,
-        chunk.try_into().unwrap(),
-        fill,
-    )
-    .build(store.clone(), &format!("/{path}"))
-    .expect("array");
+    let array = ArrayBuilder::new(shape.to_vec(), data_type, chunk.try_into().unwrap(), fill)
+        .build(store.clone(), &format!("/{path}"))
+        .expect("array");
     array.store_metadata().expect("array metadata");
 
     let subset = zarrs::array_subset::ArraySubset::new_with_shape(shape.to_vec());

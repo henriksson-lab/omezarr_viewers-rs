@@ -42,7 +42,10 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
         .collect();
 
     if words.len() < 4 {
-        bail!("a table blob starts with four words; this one has {}", words.len());
+        bail!(
+            "a table blob starts with four words; this one has {}",
+            words.len()
+        );
     }
     if words[0] != MAGIC {
         bail!("this blob does not start with a blockflow table's magic word");
@@ -156,7 +159,13 @@ mod tests {
     fn reads_a_model_segment_row() {
         // The schema `blockflow::model_segment::schema(0)` produces.
         let bytes = blob(
-            &[("id", 1), ("count", 1), ("sum_0", 1), ("sum_1", 1), ("sum_2", 1)],
+            &[
+                ("id", 1),
+                ("count", 1),
+                ("sum_0", 1),
+                ("sum_1", 1),
+                ("sum_2", 1),
+            ],
             &[
                 vec![4, 10, 20, 7, 41, 28, 40, 80],
                 vec![6, 12, 22, 9, 55, 54, 66, 132],
@@ -174,10 +183,7 @@ mod tests {
 
     #[test]
     fn f64_columns_come_back_from_their_bits() {
-        let bytes = blob(
-            &[("intensity", 2)],
-            &[vec![0, 1, 2, 1.5f64.to_bits()]],
-        );
+        let bytes = blob(&[("intensity", 2)], &[vec![0, 1, 2, 1.5f64.to_bits()]]);
         let store = read(&bytes).expect("read");
         assert_eq!(store.columns()[0].data.at(0), Some(1.5));
     }

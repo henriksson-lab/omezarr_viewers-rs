@@ -194,14 +194,8 @@ impl GridIndex {
 
         // Aim for ~64 rows per bucket, and never fewer than one bucket.
         let target = ((positions.len() as f64 / 64.0).sqrt().ceil() as usize).clamp(1, 512);
-        let extent = [
-            (max[0] - min[0]).max(1.0),
-            (max[1] - min[1]).max(1.0),
-        ];
-        let cell = [
-            extent[0] / target as f32,
-            extent[1] / target as f32,
-        ];
+        let extent = [(max[0] - min[0]).max(1.0), (max[1] - min[1]).max(1.0)];
+        let cell = [extent[0] / target as f32, extent[1] / target as f32];
         let shape = [target, target];
         let mut buckets = vec![Vec::new(); shape[0] * shape[1]];
         for (row, p) in positions.iter().enumerate() {
@@ -261,11 +255,7 @@ pub struct ObjectSelection {
 }
 
 impl ObjectStore {
-    pub fn new(
-        positions: Vec<[f32; 3]>,
-        columns: Vec<NamedColumn>,
-        has_z: bool,
-    ) -> Result<Self> {
+    pub fn new(positions: Vec<[f32; 3]>, columns: Vec<NamedColumn>, has_z: bool) -> Result<Self> {
         for column in &columns {
             if column.data.len() != positions.len() {
                 bail!(
@@ -625,7 +615,11 @@ mod tests {
         assert_eq!(columns, 1);
 
         let positions_at = 16;
-        let y = f32::from_le_bytes(bytes[positions_at + 4..positions_at + 8].try_into().unwrap());
+        let y = f32::from_le_bytes(
+            bytes[positions_at + 4..positions_at + 8]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(y, 10.0);
 
         let column_at = positions_at + count * 12 + count * 4;

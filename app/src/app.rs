@@ -485,8 +485,14 @@ impl Component for App {
             }
             AppMsg::CountRegions => {
                 let (Some(labels), Some(objects)) = (
-                    self.layers.iter().find(|l| l.is_labels()).map(|l| l.id.clone()),
-                    self.layers.iter().find(|l| l.is_objects()).map(|l| l.id.clone()),
+                    self.layers
+                        .iter()
+                        .find(|l| l.is_labels())
+                        .map(|l| l.id.clone()),
+                    self.layers
+                        .iter()
+                        .find(|l| l.is_objects())
+                        .map(|l| l.id.clone()),
                 ) else {
                     return false;
                 };
@@ -638,14 +644,12 @@ impl Component for App {
         }
 
         let on_canvas_ready = ctx.link().callback(AppMsg::CanvasReady);
-        let on_camera_changed = ctx
-            .link()
-            .callback(|(px, py, z, w, h): (f32, f32, f32, f32, f32)| {
-                AppMsg::CameraChanged(px, py, z, w, h)
-            });
-        let on_pick = ctx
-            .link()
-            .callback(|(x, y): (f32, f32)| AppMsg::Pick(x, y));
+        let on_camera_changed =
+            ctx.link()
+                .callback(|(px, py, z, w, h): (f32, f32, f32, f32, f32)| {
+                    AppMsg::CameraChanged(px, py, z, w, h)
+                });
+        let on_pick = ctx.link().callback(|(x, y): (f32, f32)| AppMsg::Pick(x, y));
 
         let panel_class = if self.panel_visible {
             "control-panel"
@@ -1024,10 +1028,7 @@ impl App {
                         hollow: state.hollow,
                         z: self.z_slice as f32,
                         slab: state.slab,
-                        selected_row: state
-                            .selected_row
-                            .map(|row| row as f32)
-                            .unwrap_or(-1.0),
+                        selected_row: state.selected_row.map(|row| row as f32).unwrap_or(-1.0),
                     }),
                 },
             })
@@ -1588,7 +1589,8 @@ impl App {
     /// The per-region tally, when there is a label layer and an object layer
     /// to join.
     fn view_regions(&self, ctx: &Context<Self>) -> Html {
-        if !(self.layers.iter().any(|l| l.is_labels()) && self.layers.iter().any(|l| l.is_objects()))
+        if !(self.layers.iter().any(|l| l.is_labels())
+            && self.layers.iter().any(|l| l.is_objects()))
         {
             return html! {};
         }
@@ -1721,7 +1723,10 @@ fn visible_world_rect(
 /// One inspected row, as a line of text: `id 4 · size 91 · confidence 0.87`.
 fn describe_row(row: &serde_json::Value) -> String {
     let mut parts = Vec::new();
-    if let (Some(y), Some(x)) = (row.get("y").and_then(|v| v.as_f64()), row.get("x").and_then(|v| v.as_f64())) {
+    if let (Some(y), Some(x)) = (
+        row.get("y").and_then(|v| v.as_f64()),
+        row.get("x").and_then(|v| v.as_f64()),
+    ) {
         let z = row.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0);
         parts.push(format!("({z:.0}, {y:.0}, {x:.0})"));
     }

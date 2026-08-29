@@ -41,8 +41,8 @@ impl Ontology {
     /// table: a file half of which failed to parse is a fact worth seeing in
     /// the log.
     pub fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let mut ontology = Ontology::default();
         let mut skipped = 0usize;
         for line in text.lines() {
@@ -154,7 +154,11 @@ mod tests {
         .unwrap();
 
         let ontology = Ontology::read(&path).expect("read");
-        assert_eq!(ontology.len(), 2, "the unreadable line is skipped, not fatal");
+        assert_eq!(
+            ontology.len(),
+            2,
+            "the unreadable line is skipped, not fatal"
+        );
         assert_eq!(ontology.name(315), Some("Isocortex"));
         assert_eq!(ontology.get(315).unwrap().parent, Some(8));
         assert_eq!(

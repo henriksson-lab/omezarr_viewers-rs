@@ -1,0 +1,134 @@
+# Build the desktop app for every platform and keep the installers.
+#
+# Two ways to run:
+#
+# * push a tag `v*` — the bundles are attached to a **draft** release, so a
+#   human decides when it is published;
+# * run it by hand (`workflow_dispatch`) — the bundles are uploaded as workflow
+#   artifacts and no release is touched.
+#
+# Either way the same thing is built, so "does it bundle" is answerable without
+# cutting a release first.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Windows runners default to PowerShell, where `mkdir -p` is not a flag and a
+# `&&` chain is not a chain. One shell everywhere means one set of steps.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bundle:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      # Needed only by the tag path, which creates the draft release.
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Older than CI's `ubuntu-latest` on purpose: an AppImage built
+          # against a newer glibc will not start on an older distribution, and
+          # the release artifact is the one that has to run elsewhere. If this
+          # runner image is ever retired, moving to `ubuntu-latest` raises that
+          # floor rather than breaking the build.
+          - name: linux (x86_64)
+            os: ubuntu-22.04
+            args: ""
+            bundle: target/release/bundle
+          # One bundle for both Mac architectures rather than two downloads.
+          - name: macos (universal)
+            os: macos-latest
+            args: "--target universal-apple-darwin"
+            bundle: target/universal-apple-darwin/release/bundle
+          - name: windows (x86_64)
+            os: windows-latest
+            args: ""
+            bundle: target/release/bundle
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Add the macOS targets
+        if: matrix.name == 'macos (universal)'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          cache-all-crates: true
+
+      - name: Install the Linux webview dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            patchelf \
+            build-essential \
+            curl wget file libssl-dev libxdo-dev
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      # The desktop binary compiles the frontend into itself, so this must run
+      # before the bundler and must be the release build.
+      - name: Build the frontend
+        run: |
+          mkdir -p app/assets
+          cd app && trunk build --release
+
+      - name: Build the bundles
+        uses: tauri-apps/tauri-action@v0
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          args: ${{ matrix.args }}
+          # A tag makes a draft release; a manual run makes nothing and leaves
+          # the artifacts to the upload step below.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('OME-Zarr Viewer {0}', github.ref_name) || '' }}
+          releaseBody: "Built by CI. See PLAN.md for what this release contains."
+          releaseDraft: true
+          prerelease: false
+
+      # Uploaded from the bundler's own output directory rather than from the
+      # action's `artifactPaths` output: that output is a JSON array, and
+      # joining it into `path` depends on an escape GitHub expressions do not
+      # have, which silently yields one unusable path.
+      - name: Keep the bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: omezarr-viewer-${{ matrix.name }}
+          path: |
+            ${{ matrix.bundle }}/**/*.AppImage
+            ${{ matrix.bundle }}/**/*.deb
+            ${{ matrix.bundle }}/**/*.rpm
+            ${{ matrix.bundle }}/**/*.dmg
+            ${{ matrix.bundle }}/**/*.app
+            ${{ matrix.bundle }}/**/*.msi
+            ${{ matrix.bundle }}/**/*.exe
+          if-no-files-found: error
+          retention-days: 14

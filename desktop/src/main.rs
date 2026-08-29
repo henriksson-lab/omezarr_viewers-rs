@@ -17,13 +17,13 @@ use std::sync::mpsc;
 
 use actix_web::{web, App, HttpResponse, HttpServer};
 use clap::Parser;
+use rust_embed::RustEmbed;
 use server::api::{self, AppState};
 use server::cache::TileCache;
 use server::objects::ObjectSpace;
 use server::project::Project;
 use server::session::{LayerRole, Session};
 use server::source::{SourceRegistry, SourceSpec};
-use rust_embed::RustEmbed;
 use tokio::sync::RwLock;
 
 /// The frontend, compiled in.
@@ -76,14 +76,10 @@ fn main() -> anyhow::Result<()> {
         .invoke_handler(tauri::generate_handler![pick_folder, pick_file])
         .setup(move |app| {
             let external = url.parse().expect("a valid url");
-            tauri::WebviewWindowBuilder::new(
-                app,
-                "main",
-                tauri::WebviewUrl::External(external),
-            )
-            .title("OME-Zarr Viewer")
-            .inner_size(1400.0, 900.0)
-            .build()?;
+            tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(external))
+                .title("OME-Zarr Viewer")
+                .inner_size(1400.0, 900.0)
+                .build()?;
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -110,7 +106,10 @@ async fn pick_file(app: tauri::AppHandle) -> Option<String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("viewer data", &["zarr", "npy", "csv", "tsv", "blob", "json"])
+        .add_filter(
+            "viewer data",
+            &["zarr", "npy", "csv", "tsv", "blob", "json"],
+        )
         .pick_file(move |path| {
             let _ = tx.send(path.map(|p| p.to_string()));
         });
@@ -135,7 +134,13 @@ fn run_server(cli: Cli, report: mpsc::Sender<SocketAddr>) -> anyhow::Result<()> 
         if let Some(source) = &cli.store {
             let spec = SourceSpec::parse(source)?;
             session
-                .add(&registry, spec, LayerRole::Auto, None, ObjectSpace::default())
+                .add(
+                    &registry,
+                    spec,
+                    LayerRole::Auto,
+                    None,
+                    ObjectSpace::default(),
+                )
                 .await?;
         }
 

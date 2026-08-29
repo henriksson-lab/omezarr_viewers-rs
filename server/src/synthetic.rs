@@ -68,8 +68,7 @@ pub fn write_image(path: &Path, shape: (u64, u64, u64), blobs: &[Blob]) -> Resul
                 (0..level_shape[1]).flat_map(move |z| {
                     (0..level_shape[2]).flat_map(move |y| {
                         (0..level_shape[3]).map(move |x| {
-                            let (fz, fy, fx) =
-                                (z as f64, (y * step) as f64, (x * step) as f64);
+                            let (fz, fy, fx) = (z as f64, (y * step) as f64, (x * step) as f64);
                             let inside = blobs.iter().find(|b| {
                                 let dz = (b.z - fz) / (b.radius * 0.5);
                                 let dy = (b.y - fy) / b.radius;
