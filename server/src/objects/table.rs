@@ -37,8 +37,10 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
         );
     }
     let words: Vec<u64> = bytes
-        .chunks_exact(8)
-        .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|word| u64::from_le_bytes(*word))
         .collect();
 
     if words.len() < 4 {
@@ -199,8 +201,10 @@ mod tests {
     #[test]
     fn a_version_bump_is_reported_not_guessed() {
         let mut words: Vec<u64> = blob(&[("id", 1)], &[vec![0, 0, 0, 1]])
-            .chunks_exact(8)
-            .map(|w| u64::from_le_bytes(w.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|w| u64::from_le_bytes(*w))
             .collect();
         words[1] = VERSION + 1;
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();

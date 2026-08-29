@@ -92,8 +92,10 @@ pub fn npy_to_zarr(
         planes.push(
             plane
                 .bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c) as f64)
                 .collect(),
         );
     }
@@ -334,8 +336,10 @@ mod tests {
             .expect("tile");
         let pixels: Vec<f32> = tile
             .bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         for row in 0..2u64 {
             for column in 0..3u64 {

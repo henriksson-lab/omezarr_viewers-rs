@@ -140,8 +140,10 @@ pub async fn fetch_tile(layer: &str, at: &TileAddress) -> Result<Vec<f32>, Strin
         .await
         .map_err(|e| format!("read tile bytes: {}", e))?;
     Ok(bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 
@@ -176,27 +178,37 @@ pub fn ids_from_bytes(bytes: &[u8], dtype: &str) -> Result<Vec<u32>, String> {
         "uint8" => Ok(bytes.iter().map(|&b| b as u32).collect()),
         "int8" => Ok(bytes.iter().map(|&b| (b as i8).max(0) as u32).collect()),
         "uint16" => Ok(bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c) as u32)
             .collect()),
         "int16" => Ok(bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]).max(0) as u32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c).max(0) as u32)
             .collect()),
         "uint32" => Ok(bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c))
             .collect()),
         "int32" => Ok(bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]).max(0) as u32)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_le_bytes(*c).max(0) as u32)
             .collect()),
         "uint64" => {
             let mut overflowed = false;
             let ids: Vec<u32> = bytes
-                .chunks_exact(8)
+                .as_chunks::<8>()
+                .0
+                .iter()
                 .map(|c| {
-                    let wide = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
+                    let wide = u64::from_le_bytes(*c);
                     if wide > u32::MAX as u64 {
                         overflowed = true;
                     }
@@ -470,8 +482,10 @@ pub async fn fetch_slice(
         .await
         .map_err(|e| format!("read slice: {}", e))?;
     let pixels = bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect();
     Ok(PlaneData {
         pixels,

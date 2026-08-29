@@ -18,8 +18,10 @@ const SHAPE: [u64; 4] = [2, 4, 16, 16];
 
 fn f32_tile(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 
@@ -74,8 +76,10 @@ async fn raw_encoding_preserves_the_arrays_own_dtype() {
 
     let ids: Vec<u32> = tile
         .bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
         .collect();
     for row in 0..2u64 {
         for col in 0..2u64 {

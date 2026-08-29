@@ -705,40 +705,46 @@ pub fn bytes_to_f32(raw: &[u8], dtype: &str) -> Result<Vec<f32>> {
         "uint8" => Ok(raw.iter().map(|&b| b as f32).collect()),
         "int8" => Ok(raw.iter().map(|&b| b as i8 as f32).collect()),
         "uint16" => Ok(raw
-            .chunks_exact(2)
-            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]) as f32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| u16::from_le_bytes(*chunk) as f32)
             .collect()),
         "int16" => Ok(raw
-            .chunks_exact(2)
-            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| i16::from_le_bytes(*chunk) as f32)
             .collect()),
         "uint32" => Ok(raw
-            .chunks_exact(4)
-            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk) as f32)
             .collect()),
         "int32" => Ok(raw
-            .chunks_exact(4)
-            .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f32)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| i32::from_le_bytes(*chunk) as f32)
             .collect()),
         "uint64" => Ok(raw
-            .chunks_exact(8)
-            .map(|chunk| {
-                u64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]) as f32
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk) as f32)
             .collect()),
         "float32" => Ok(raw
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect()),
         "float64" => Ok(raw
-            .chunks_exact(8)
-            .map(|chunk| {
-                f64::from_le_bytes([
-                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-                ]) as f32
-            })
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| f64::from_le_bytes(*chunk) as f32)
             .collect()),
         _ => anyhow::bail!("Unsupported dtype: {}", dtype),
     }

@@ -56,10 +56,17 @@ demo:
 	cargo run --release --bin make_demo -- $(DEMO)
 	@echo "now: make run PROJECT=$(DEMO)"
 
+# Clippy caches by crate fingerprint, so an unchanged crate is *not* re-linted
+# and a run can pass on stale results — which is how a lint that CI failed on
+# passed here first. Touching each crate root forces the lint to actually run.
 test:
 	cargo test -p server
-	cd app && cargo clippy --target wasm32-unknown-unknown -- -D warnings
+	@touch src/lib.rs server/src/lib.rs app/src/main.rs desktop/src/main.rs
+	cargo clippy -p omezarr-viewer-common --all-targets -- -D warnings
 	cargo clippy -p server --all-targets -- -D warnings
+	cd app && cargo clippy --target wasm32-unknown-unknown -- -D warnings
+	cargo clippy -p omezarr-viewer-desktop --all-targets -- -D warnings
+	cargo fmt --all -- --check
 
 clean:
 	cargo clean

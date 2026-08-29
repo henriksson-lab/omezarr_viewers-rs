@@ -84,6 +84,11 @@ jobs:
       - name: Test the server
         run: cargo test -p server
 
+      # Every crate is named: a dependency is *not* linted when its dependent
+      # is, so linting `server` alone would say nothing about the shared types.
+      - name: Lint the shared types
+        run: cargo clippy -p omezarr-viewer-common --all-targets -- -D warnings
+
       - name: Lint the server
         run: cargo clippy -p server --all-targets -- -D warnings
 
@@ -91,6 +96,11 @@ jobs:
         working-directory: app
         run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
 
+      - name: Lint the desktop app
+        run: cargo clippy -p omezarr-viewer-desktop --all-targets -- -D warnings
+
+      # Clippy checks but does not link; the build is what proves the binary
+      # comes out the other end with the frontend inside it.
       - name: Build the desktop app
         run: cargo build -p omezarr-viewer-desktop
 
