@@ -3,6 +3,14 @@ name = "server"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "omezarr_viewer_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
 [dependencies]
 omezarr-viewer-common = { path = ".." }
 actix-web = "4"
@@ -17,3 +25,8 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 log = "0.4"
 env_logger = "0.11"
+csv = "1"
+memmap2 = "0.9"
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["server", "app"]
+members = ["server", "app", "desktop"]
 default-members = ["server"]
 
 [dependencies]

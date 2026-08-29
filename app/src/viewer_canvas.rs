@@ -7,15 +7,39 @@ use web_sys::HtmlCanvasElement;
 use yew::prelude::*;
 
 use crate::webgl::context::GlContext;
-use crate::webgl::renderer::{Renderer, TileTexture};
+use crate::webgl::renderer::{
+    Blend, LabelRenderInfo, PointBuffer, PointRenderInfo, Renderer, TextureKind, TilePlacement,
+    TileTexture,
+};
 
 /// Per-channel rendering parameters passed as props to the canvas.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct ChannelRenderInfo {
     pub color: [f32; 3],
     pub contrast_min: f32,
     pub contrast_max: f32,
     pub opacity: f32,
+}
+
+/// How one layer is drawn, and with which program.
+#[derive(Clone, PartialEq)]
+pub enum LayerRenderKind {
+    Image {
+        channels: Vec<ChannelRenderInfo>,
+        dtype_max: f32,
+        /// How this layer meets the layers under it.
+        blend: Blend,
+    },
+    Labels(LabelRenderInfo),
+    Objects(PointRenderInfo),
+}
+
+/// One layer's rendering parameters, in draw order.
+#[derive(Clone, PartialEq)]
+pub struct LayerRenderInfo {
+    pub id: String,
+    pub visible: bool,
+    pub kind: LayerRenderKind,
 }
 
 /// 2D camera state: pan position, zoom level, and drag tracking.
@@ -26,56 +50,86 @@ pub struct Camera2d {
     pub canvas_w: f32,
     pub canvas_h: f32,
     pub dragging: bool,
+    /// Set once a drag actually moves, so a click can be told from a pan.
+    pub dragged: bool,
     pub last_mouse: (f32, f32),
     pub pinch_dist: Option<f32>,
     pub pinch_center: (f32, f32),
 }
 
-/// Cache key identifying a tile by pyramid level, grid position, and channel.
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+/// Cache key identifying a tile by layer, pyramid level, grid position, and channel.
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct TileKey {
+    pub layer: String,
     pub level: usize,
     pub tile_y: u32,
     pub tile_x: u32,
+    /// The channel, for image layers; 0 for label layers, which have one.
     pub channel: usize,
 }
 
-/// Tile grid metadata for a single pyramid level.
-#[derive(Clone, Debug)]
+/// Tile grid metadata for one layer at one pyramid level.
+#[derive(Clone, Debug, PartialEq)]
 pub struct LevelTileInfo {
-    pub image_size: (f32, f32),
+    /// Size of this level in the layer's own pixels.
+    pub level_size: (f32, f32),
+    /// Tile size in the layer's own pixels.
     pub tile_size: (f32, f32),
     pub num_tiles_x: u32,
     pub num_tiles_y: u32,
+    /// Multiply a layer pixel by this to get a world pixel.
+    ///
+    /// This is what lets a half-resolution label volume land on top of the
+    /// image it describes rather than in a quarter of it.
+    pub world_scale: (f32, f32),
 }
 
 /// Shared mutable state between App (tile uploads) and ViewerCanvas (rendering).
 pub struct ViewerCanvasState {
     pub renderer: Renderer,
     pub tile_cache: HashMap<TileKey, TileTexture>,
-    pub level_info: HashMap<usize, LevelTileInfo>,
-    pub current_level: usize,
+    /// Grid metadata per `(layer id, level)`.
+    pub level_info: HashMap<(String, usize), LevelTileInfo>,
+    /// The level each layer is currently drawing at.
+    pub current_level: HashMap<String, usize>,
+    /// One uploaded point batch per object layer, keyed by layer id.
+    pub object_buffers: HashMap<String, PointBuffer>,
+    /// The world every layer is drawn in — the reference layer's
+    /// full-resolution size. Kept here as well as in props so a mouse event,
+    /// which has no access to props, can invert the camera transform.
+    pub world_size: (f32, f32),
     pub camera: Camera2d,
+}
+
+impl ViewerCanvasState {
+    /// The levels this layer has grid info for, coarsest first.
+    fn levels_of(&self, layer: &str) -> Vec<usize> {
+        let mut levels: Vec<usize> = self
+            .level_info
+            .keys()
+            .filter(|(id, _)| id == layer)
+            .map(|(_, level)| *level)
+            .collect();
+        levels.sort_unstable_by(|a, b| b.cmp(a));
+        levels
+    }
 }
 
 /// Props for the ViewerCanvas component.
 #[derive(Properties, PartialEq)]
 pub struct ViewerCanvasProps {
-    pub channel_info: Vec<ChannelRenderInfo>,
-    pub dtype_max: f32,
+    /// Layers in draw order, bottom first.
+    pub layers: Vec<LayerRenderInfo>,
+    /// The coordinate space every layer is drawn in: the reference layer's
+    /// full-resolution `(width, height)`.
+    pub world_size: (f32, f32),
     #[prop_or_default]
     pub on_canvas_ready: Callback<Rc<RefCell<Option<ViewerCanvasState>>>>,
     #[prop_or_default]
     pub on_camera_changed: Callback<(f32, f32, f32, f32, f32)>, // (pan_x, pan_y, zoom, canvas_w, canvas_h)
-}
-
-impl PartialEq for ChannelRenderInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.color == other.color
-            && self.contrast_min == other.contrast_min
-            && self.contrast_max == other.contrast_max
-            && self.opacity == other.opacity
-    }
+    /// A click that was not a drag, in world pixel coordinates.
+    #[prop_or_default]
+    pub on_pick: Callback<(f32, f32)>,
 }
 
 /// WebGL2 canvas component handling rendering, pan, and zoom.
@@ -89,7 +143,7 @@ pub enum ViewerMsg {
     Init,
     MouseDown(MouseEvent),
     MouseMove(MouseEvent),
-    MouseUp(()),
+    MouseUp(MouseEvent),
     Wheel(WheelEvent),
     TouchStart(web_sys::TouchEvent),
     TouchMove(web_sys::TouchEvent),
@@ -134,7 +188,9 @@ impl Component for ViewerCanvas {
                                     renderer,
                                     tile_cache: HashMap::new(),
                                     level_info: HashMap::new(),
-                                    current_level: 0,
+                                    current_level: HashMap::new(),
+                                    object_buffers: HashMap::new(),
+                                    world_size: (0.0, 0.0),
                                     camera: Camera2d {
                                         x: 0.0,
                                         y: 0.0,
@@ -142,18 +198,21 @@ impl Component for ViewerCanvas {
                                         canvas_w: rect.width() as f32,
                                         canvas_h: rect.height() as f32,
                                         dragging: false,
+                                        dragged: false,
                                         last_mouse: (0.0, 0.0),
                                         pinch_dist: None,
                                         pinch_center: (0.0, 0.0),
                                     },
                                 };
                                 *self.state.borrow_mut() = Some(state);
-                                ctx.props()
-                                    .on_canvas_ready
-                                    .emit(self.state.clone());
-                                ctx.props()
-                                    .on_camera_changed
-                                    .emit((0.0, 0.0, 1.0, rect.width() as f32, rect.height() as f32));
+                                ctx.props().on_canvas_ready.emit(self.state.clone());
+                                ctx.props().on_camera_changed.emit((
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                    rect.width() as f32,
+                                    rect.height() as f32,
+                                ));
                             }
                             Err(e) => log::error!("Renderer init: {}", e),
                         },
@@ -174,6 +233,7 @@ impl Component for ViewerCanvas {
             ViewerMsg::MouseDown(e) => {
                 if let Some(ref mut state) = *self.state.borrow_mut() {
                     state.camera.dragging = true;
+                    state.camera.dragged = false;
                     state.camera.last_mouse = (e.client_x() as f32, e.client_y() as f32);
                 }
                 false
@@ -184,6 +244,9 @@ impl Component for ViewerCanvas {
                     if state.camera.dragging {
                         let dx = e.client_x() as f32 - state.camera.last_mouse.0;
                         let dy = e.client_y() as f32 - state.camera.last_mouse.1;
+                        if dx.abs() > 1.0 || dy.abs() > 1.0 {
+                            state.camera.dragged = true;
+                        }
                         state.camera.x += dx;
                         state.camera.y += dy;
                         state.camera.last_mouse = (e.client_x() as f32, e.client_y() as f32);
@@ -195,13 +258,21 @@ impl Component for ViewerCanvas {
                 }
                 false
             }
-            ViewerMsg::MouseUp(_) => {
-                let was_dragging;
-                if let Some(ref mut state) = *self.state.borrow_mut() {
-                    was_dragging = state.camera.dragging;
-                    state.camera.dragging = false;
-                } else {
-                    was_dragging = false;
+            ViewerMsg::MouseUp(e) => {
+                let (was_dragging, was_click) = match *self.state.borrow_mut() {
+                    Some(ref mut state) => {
+                        let dragging = state.camera.dragging;
+                        let click = dragging && !state.camera.dragged;
+                        state.camera.dragging = false;
+                        state.camera.dragged = false;
+                        (dragging, click)
+                    }
+                    None => (false, false),
+                };
+                if was_click {
+                    if let Some(world) = self.world_at(&e) {
+                        ctx.props().on_pick.emit(world);
+                    }
                 }
                 if was_dragging {
                     self.emit_camera_changed(ctx);
@@ -219,8 +290,10 @@ impl Component for ViewerCanvas {
                     // Mouse position relative to canvas center (in pixels)
                     if let Some(canvas) = self.canvas_ref.cast::<HtmlCanvasElement>() {
                         let rect = canvas.get_bounding_client_rect();
-                        let mx = e.client_x() as f32 - rect.left() as f32 - rect.width() as f32 / 2.0;
-                        let my = e.client_y() as f32 - rect.top() as f32 - rect.height() as f32 / 2.0;
+                        let mx =
+                            e.client_x() as f32 - rect.left() as f32 - rect.width() as f32 / 2.0;
+                        let my =
+                            e.client_y() as f32 - rect.top() as f32 - rect.height() as f32 / 2.0;
 
                         // Adjust pan so the point under the cursor stays fixed
                         state.camera.x = mx + (state.camera.x - mx) * actual_factor;
@@ -344,7 +417,7 @@ impl Component for ViewerCanvas {
     fn view(&self, ctx: &Context<Self>) -> Html {
         let on_mousedown = ctx.link().callback(ViewerMsg::MouseDown);
         let on_mousemove = ctx.link().callback(ViewerMsg::MouseMove);
-        let on_mouseup = ctx.link().callback(|_: MouseEvent| ViewerMsg::MouseUp(()));
+        let on_mouseup = ctx.link().callback(ViewerMsg::MouseUp);
         let on_wheel = ctx.link().callback(ViewerMsg::Wheel);
         let on_touchstart = ctx.link().callback(ViewerMsg::TouchStart);
         let on_touchmove = ctx.link().callback(ViewerMsg::TouchMove);
@@ -366,10 +439,15 @@ impl Component for ViewerCanvas {
     }
 
     fn changed(&mut self, ctx: &Context<Self>, _old_props: &Self::Properties) -> bool {
-        // Re-render when channel info changes
+        // Re-render when layer info changes
         self.redraw(ctx);
         true
     }
+}
+
+/// The world size the canvas last drew in.
+fn camera_world(state: &ViewerCanvasState) -> (f32, f32) {
+    state.world_size
 }
 
 impl ViewerCanvas {
@@ -389,7 +467,44 @@ impl ViewerCanvas {
         }
     }
 
-    /// Clear and redraw all visible tiles, rendering fallback levels first.
+    /// The world pixel under a mouse event — the vertex shader's transform,
+    /// inverted.
+    fn world_at(&self, e: &MouseEvent) -> Option<(f32, f32)> {
+        let canvas = self.canvas_ref.cast::<HtmlCanvasElement>()?;
+        let rect = canvas.get_bounding_client_rect();
+        let state_ref = self.state.borrow();
+        let state = state_ref.as_ref()?;
+        let camera = &state.camera;
+
+        let (world_w, world_h) = camera_world(state);
+        if world_w <= 0.0 || world_h <= 0.0 {
+            return None;
+        }
+        let canvas_w = rect.width() as f32;
+        let canvas_h = rect.height() as f32;
+        let fit = camera.zoom * (canvas_w / world_w).min(canvas_h / world_h);
+        let scale_x = fit * world_w / canvas_w;
+        let scale_y = fit * world_h / canvas_h;
+        if scale_x == 0.0 || scale_y == 0.0 {
+            return None;
+        }
+
+        let px = e.client_x() as f32 - rect.left() as f32;
+        let py = e.client_y() as f32 - rect.top() as f32;
+
+        // Clip coordinates, with the shader's y flip already undone.
+        let clip_x = px / canvas_w * 2.0 - 1.0;
+        let flipped_y = py / canvas_h * 2.0 - 1.0;
+
+        let centered_x = (clip_x - camera.x * 2.0 / canvas_w) / scale_x;
+        let centered_y = (flipped_y - camera.y * 2.0 / canvas_h) / scale_y;
+
+        let world_x = (centered_x / 2.0 + 0.5) * world_w;
+        let world_y = (centered_y / 2.0 + 0.5) * world_h;
+        Some((world_x, world_y))
+    }
+
+    /// Clear and redraw every layer, coarse levels first as a fallback.
     fn redraw(&self, ctx: &Context<Self>) {
         let state_ref = self.state.borrow();
         let state = match state_ref.as_ref() {
@@ -402,90 +517,131 @@ impl ViewerCanvas {
             None => return,
         };
 
-        let cw = canvas.width() as f32;
-        let ch = canvas.height() as f32;
+        let canvas_size = (canvas.width() as f32, canvas.height() as f32);
+        let props = ctx.props();
+        let world = props.world_size;
+        if world.0 <= 0.0 || world.1 <= 0.0 {
+            return;
+        }
 
         state.renderer.clear();
 
-        let props = ctx.props();
-        let cur = state.current_level;
+        for layer in &props.layers {
+            if !layer.visible {
+                continue;
+            }
+            if let LayerRenderKind::Objects(info) = &layer.kind {
+                if let Some(points) = state.object_buffers.get(&layer.id) {
+                    // Points carry their own world position, so the placement
+                    // only has to say what the world is and where the camera
+                    // is looking.
+                    let placement = TilePlacement {
+                        tile_offset: (0.0, 0.0),
+                        tile_size: (1.0, 1.0),
+                        image_size: world,
+                        canvas_size,
+                        pan: (state.camera.x, state.camera.y),
+                        zoom: state.camera.zoom,
+                    };
+                    state.renderer.draw_points(points, &placement, info);
+                }
+                continue;
+            }
 
-        let cur_info = match state.level_info.get(&cur) {
-            Some(info) => info,
-            None => return,
-        };
-
-        // Collect levels present in cache, sorted coarsest first (higher index = coarser)
-        let mut levels_in_cache: Vec<usize> = state.level_info.keys().copied()
-            .filter(|&l| l != cur)
-            .collect();
-        levels_in_cache.sort_unstable_by(|a, b| b.cmp(a));
-
-        // Draw fallback levels first (coarsest to finest, excluding current).
-        // These provide coverage while current-level tiles are loading.
-        for &level in &levels_in_cache {
-            let info = &state.level_info[&level];
-            self.draw_level_tiles(state, props, level, info, cur_info.image_size, cw, ch);
+            let current = state.current_level.get(&layer.id).copied().unwrap_or(0);
+            // Coarser levels first: they cover the gaps while the current
+            // level's tiles are still arriving, and the current level draws
+            // over them.
+            let mut levels = state.levels_of(&layer.id);
+            levels.retain(|&level| level != current);
+            levels.push(current);
+            for level in levels {
+                self.draw_layer_level(state, layer, level, world, canvas_size);
+            }
         }
-
-        // Draw current level on top — replaces fallback where loaded (blend alpha=1)
-        self.draw_level_tiles(state, props, cur, cur_info, cur_info.image_size, cw, ch);
     }
 
-    /// Render all cached tiles for a single pyramid level, scaled to the current image coordinate space.
-    fn draw_level_tiles(
+    /// Draw every cached tile of one layer at one level.
+    fn draw_layer_level(
         &self,
         state: &ViewerCanvasState,
-        props: &ViewerCanvasProps,
+        layer: &LayerRenderInfo,
         level: usize,
-        info: &LevelTileInfo,
-        render_image_size: (f32, f32),
-        cw: f32,
-        ch: f32,
+        world: (f32, f32),
+        canvas_size: (f32, f32),
     ) {
+        let Some(info) = state.level_info.get(&(layer.id.clone(), level)) else {
+            return;
+        };
         let (tw, th) = info.tile_size;
-        // Scale factor: map this level's pixel coords to the current level's image coords
-        let sx = render_image_size.0 / info.image_size.0;
-        let sy = render_image_size.1 / info.image_size.1;
+        let (sx, sy) = info.world_scale;
+        let camera = &state.camera;
 
         for ty in 0..info.num_tiles_y {
             for tx in 0..info.num_tiles_x {
-                let mut channel_data: Vec<(&TileTexture, [f32; 3], f32, f32, f32)> = Vec::new();
-                let mut actual_w = tw;
-                let mut actual_h = th;
+                let placement = |tex: &TileTexture| TilePlacement {
+                    tile_offset: (tx as f32 * tw * sx, ty as f32 * th * sy),
+                    tile_size: (tex.width as f32 * sx, tex.height as f32 * sy),
+                    image_size: world,
+                    canvas_size,
+                    pan: (camera.x, camera.y),
+                    zoom: camera.zoom,
+                };
 
-                for (ch_idx, ch_info) in props.channel_info.iter().enumerate() {
-                    if ch_info.opacity <= 0.0 {
-                        continue;
+                match &layer.kind {
+                    LayerRenderKind::Image {
+                        channels,
+                        dtype_max,
+                        blend,
+                    } => {
+                        let mut bound: Vec<(&TileTexture, [f32; 3], f32, f32, f32)> = Vec::new();
+                        for (channel, info) in channels.iter().enumerate() {
+                            if info.opacity <= 0.0 {
+                                continue;
+                            }
+                            let key = TileKey {
+                                layer: layer.id.clone(),
+                                level,
+                                tile_y: ty,
+                                tile_x: tx,
+                                channel,
+                            };
+                            if let Some(tex) = state.tile_cache.get(&key) {
+                                if tex.kind != TextureKind::Intensity {
+                                    continue;
+                                }
+                                bound.push((
+                                    tex,
+                                    info.color,
+                                    info.contrast_min,
+                                    info.contrast_max,
+                                    info.opacity,
+                                ));
+                            }
+                        }
+                        if let Some((first, _, _, _, _)) = bound.first() {
+                            let placement = placement(first);
+                            state
+                                .renderer
+                                .draw_tile(&bound, &placement, *dtype_max, *blend);
+                        }
                     }
-                    let key = TileKey { level, tile_y: ty, tile_x: tx, channel: ch_idx };
-                    if let Some(tex) = state.tile_cache.get(&key) {
-                        actual_w = tex.width as f32;
-                        actual_h = tex.height as f32;
-                        channel_data.push((
-                            tex,
-                            ch_info.color,
-                            ch_info.contrast_min,
-                            ch_info.contrast_max,
-                            ch_info.opacity,
-                        ));
+                    LayerRenderKind::Objects(_) => {}
+                    LayerRenderKind::Labels(label_info) => {
+                        let key = TileKey {
+                            layer: layer.id.clone(),
+                            level,
+                            tile_y: ty,
+                            tile_x: tx,
+                            channel: 0,
+                        };
+                        if let Some(tex) = state.tile_cache.get(&key) {
+                            let placement = placement(tex);
+                            state
+                                .renderer
+                                .draw_label_tile(&layer.id, tex, &placement, label_info);
+                        }
                     }
-                }
-
-                if !channel_data.is_empty() {
-                    let tile_offset = (tx as f32 * tw * sx, ty as f32 * th * sy);
-                    let tile_size = (actual_w * sx, actual_h * sy);
-
-                    state.renderer.draw_tile(
-                        &channel_data,
-                        tile_offset,
-                        tile_size,
-                        render_image_size,
-                        (cw, ch),
-                        (state.camera.x, state.camera.y),
-                        state.camera.zoom,
-                        props.dtype_max,
-                    );
                 }
             }
         }

@@ -42,4 +42,7 @@ features = [
   "TouchEvent",
   "TouchList",
   "Touch",
+  "Blob",
+  "Url",
+  "HtmlAnchorElement",
 ]

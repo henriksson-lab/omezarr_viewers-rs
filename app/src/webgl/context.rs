@@ -3,10 +3,19 @@ use web_sys::{HtmlCanvasElement, WebGl2RenderingContext, WebGlProgram, WebGlShad
 
 use super::shaders;
 
-/// WebGL2 context wrapper holding the GL handle and compiled shader program.
+/// WebGL2 context wrapper holding the GL handle and every compiled program.
+///
+/// One context, several programs: intensity compositing and label colouring
+/// answer different questions about different textures, and a uniform-flagged
+/// single program would pay for both on every fragment.
 pub struct GlContext {
     pub gl: WebGl2RenderingContext,
+    /// Additive multi-channel intensity.
     pub program: WebGlProgram,
+    /// Integer label ids.
+    pub label_program: WebGlProgram,
+    /// Object points.
+    pub point_program: WebGlProgram,
 }
 
 impl GlContext {
@@ -23,18 +32,39 @@ impl GlContext {
         gl.get_extension("OES_texture_float_linear")
             .map_err(|_| "OES_texture_float_linear not available")?;
 
-        let program = create_program(&gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+        let vertex = shaders::tile_vertex_shader();
+        let program = create_program(&gl, &vertex, shaders::FRAGMENT_SHADER)?;
+        let label_program = create_program(&gl, &vertex, shaders::LABEL_FRAGMENT_SHADER)?;
+        let point_program = create_program(
+            &gl,
+            &shaders::point_vertex_shader(),
+            shaders::POINT_FRAGMENT_SHADER,
+        )?;
         gl.use_program(Some(&program));
 
-        // Enable blending — channel compositing happens in shader,
-        // GL blend just needs latest draw to replace previous (alpha=1.0)
+        // Blending is `over` on **premultiplied** colour, which is what the
+        // canvas itself stores (`premultipliedAlpha` defaults to true). Every
+        // shader here multiplies its colour by its own alpha, so the source
+        // factor is ONE rather than SRC_ALPHA.
+        //
+        // This is not a preference. With SRC_ALPHA and un-premultiplied output
+        // the framebuffer ends up holding pixels whose colour exceeds their
+        // alpha, which is not a valid premultiplied pixel; the compositor's
+        // behaviour on those is undefined, and what it actually did was drop a
+        // channel — a green label over a green image composited to no green at
+        // all. Measured, not theorised.
         gl.enable(WebGl2RenderingContext::BLEND);
         gl.blend_func(
-            WebGl2RenderingContext::SRC_ALPHA,
+            WebGl2RenderingContext::ONE,
             WebGl2RenderingContext::ONE_MINUS_SRC_ALPHA,
         );
 
-        Ok(Self { gl, program })
+        Ok(Self {
+            gl,
+            program,
+            label_program,
+            point_program,
+        })
     }
 }
 
@@ -57,9 +87,7 @@ fn compile_shader(
     {
         Ok(shader)
     } else {
-        let log = gl
-            .get_shader_info_log(&shader)
-            .unwrap_or_default();
+        let log = gl.get_shader_info_log(&shader).unwrap_or_default();
         gl.delete_shader(Some(&shader));
         Err(format!("Shader compile error: {}", log))
     }
@@ -86,9 +114,7 @@ fn create_program(
     {
         Ok(program)
     } else {
-        let log = gl
-            .get_program_info_log(&program)
-            .unwrap_or_default();
+        let log = gl.get_program_info_log(&program).unwrap_or_default();
         gl.delete_program(Some(&program));
         Err(format!("Program link error: {}", log))
     }

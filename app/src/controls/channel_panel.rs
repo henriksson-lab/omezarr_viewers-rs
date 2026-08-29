@@ -25,7 +25,7 @@ pub fn color_to_hex(c: &[f32; 3]) -> String {
 }
 
 /// Parse a hex color string into an RGB float triplet.
-fn hex_to_color(hex: &str) -> Option<[f32; 3]> {
+pub fn hex_to_color(hex: &str) -> Option<[f32; 3]> {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
         return None;

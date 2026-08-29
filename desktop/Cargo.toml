@@ -1,0 +1,23 @@
+[package]
+name = "omezarr-viewer-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "The OME-Zarr viewer as a desktop app"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+server = { path = "../server", package = "server" }
+omezarr-viewer-common = { path = ".." }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+actix-web = "4"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+mime_guess = "2"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync"] }
