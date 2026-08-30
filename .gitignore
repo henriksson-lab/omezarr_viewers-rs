@@ -7,4 +7,9 @@ dist/
 # to one only so an editor can autocomplete it.
 desktop/gen/schemas/
 
-__pycache__
+# Python bytecode from the browser suites. The interpreter writes these beside
+# the sources on every run, and they are per-interpreter-version
+# (`cpython-312`), so committing them makes the tree dirty for anyone on a
+# different Python.
+__pycache__/
+*.pyc
