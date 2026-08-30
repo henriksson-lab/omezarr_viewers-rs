@@ -2,48 +2,19 @@
 
 use omezarr_viewer_common::{Annotation, SessionInfo};
 
-use gloo_net::http::Request;
-
-use super::get_host_url;
+use super::{delete_ok, get_host_url, get_json, post_empty_json, post_json, put_json};
 
 /// Create an empty annotation layer, returning the new session.
 pub async fn add_annotation_layer(name: &str) -> Result<SessionInfo, String> {
     let url = format!("{}/api/annotations/layers", get_host_url());
-    let resp = Request::post(&url)
-        .json(&serde_json::json!({ "name": name }))
-        .map_err(|e| format!("new annotation layer body: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("new annotation layer: {e}"))?;
-    if !resp.ok() {
-        return Err(format!(
-            "new annotation layer: {}",
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-    resp.json::<SessionInfo>()
-        .await
-        .map_err(|e| format!("parse session: {e}"))
+    let body = serde_json::json!({ "name": name });
+    post_json(&url, &body, "new annotation layer", "parse session").await
 }
 
 /// Add one annotation, returning it with the id the server assigned.
 pub async fn add_annotation(layer: &str, annotation: &Annotation) -> Result<Annotation, String> {
     let url = format!("{}/api/annotations/{}", get_host_url(), layer);
-    let resp = Request::post(&url)
-        .json(annotation)
-        .map_err(|e| format!("add annotation body: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("add annotation: {e}"))?;
-    if !resp.ok() {
-        return Err(format!(
-            "add annotation: {}",
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-    resp.json::<Annotation>()
-        .await
-        .map_err(|e| format!("parse annotation: {e}"))
+    post_json(&url, annotation, "add annotation", "parse annotation").await
 }
 
 /// Replace one annotation's geometry and class, keeping its id.
@@ -54,37 +25,13 @@ pub async fn update_annotation(layer: &str, annotation: &Annotation) -> Result<A
         layer,
         annotation.id
     );
-    let resp = Request::put(&url)
-        .json(annotation)
-        .map_err(|e| format!("update annotation body: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("update annotation: {e}"))?;
-    if !resp.ok() {
-        return Err(format!(
-            "update annotation: {}",
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-    resp.json::<Annotation>()
-        .await
-        .map_err(|e| format!("parse annotation: {e}"))
+    put_json(&url, annotation, "update annotation", "parse annotation").await
 }
 
 /// Drop one annotation.
 pub async fn remove_annotation(layer: &str, id: u64) -> Result<(), String> {
     let url = format!("{}/api/annotations/{}/{}", get_host_url(), layer, id);
-    let resp = Request::delete(&url)
-        .send()
-        .await
-        .map_err(|e| format!("remove annotation: {e}"))?;
-    if !resp.ok() {
-        return Err(format!(
-            "remove annotation: {}",
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-    Ok(())
+    delete_ok(&url, "remove annotation").await
 }
 
 /// What a save reports back.
@@ -116,18 +63,8 @@ pub async fn save_annotations(
     target: Option<&str>,
 ) -> Result<SavedAnnotations, String> {
     let url = format!("{}/api/annotations/{}/save", get_host_url(), layer);
-    let resp = Request::post(&url)
-        .json(&serde_json::json!({ "target": target }))
-        .map_err(|e| format!("save body: {e}"))?
-        .send()
-        .await
-        .map_err(|e| format!("save annotations: {e}"))?;
-    if !resp.ok() {
-        return Err(resp.text().await.unwrap_or_else(|_| "save failed".into()));
-    }
-    resp.json::<SavedAnnotations>()
-        .await
-        .map_err(|e| format!("parse save result: {e}"))
+    let body = serde_json::json!({ "target": target });
+    post_json(&url, &body, "save annotations", "parse save result").await
 }
 
 /// The ROI tables a store already holds, and the store they were looked for in.
@@ -151,51 +88,19 @@ pub async fn fetch_tables(store: Option<&str>) -> Result<StoreTables, String> {
         Some(store) => format!("{}/api/annotations/tables?store={}", get_host_url(), store),
         None => format!("{}/api/annotations/tables", get_host_url()),
     };
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("list tables: {e}"))?;
-    if !resp.ok() {
-        return Err(format!("list tables: status {}", resp.status()));
-    }
-    resp.json::<StoreTables>()
-        .await
-        .map_err(|e| format!("parse tables: {e}"))
+    get_json(&url, "list tables", "parse tables").await
 }
 
 /// Rebuild a layer's hierarchy from where its shapes now are.
 pub async fn renest_annotations(layer: &str) -> Result<Vec<Annotation>, String> {
-    post_rows(&format!(
-        "{}/api/annotations/{}/renest",
-        get_host_url(),
-        layer
-    ))
-    .await
+    let url = format!("{}/api/annotations/{}/renest", get_host_url(), layer);
+    post_empty_json(&url, "renest annotations", "parse rows").await
 }
 
 /// Lift one annotation out of its parent.
 pub async fn detach_annotation(layer: &str, id: u64) -> Result<Vec<Annotation>, String> {
-    post_rows(&format!(
-        "{}/api/annotations/{}/{}/detach",
-        get_host_url(),
-        layer,
-        id
-    ))
-    .await
-}
-
-/// A POST that answers with the layer's rows.
-async fn post_rows(url: &str) -> Result<Vec<Annotation>, String> {
-    let resp = Request::post(url)
-        .send()
-        .await
-        .map_err(|e| format!("request: {e}"))?;
-    if !resp.ok() {
-        return Err(resp.text().await.unwrap_or_else(|_| "failed".into()));
-    }
-    resp.json::<Vec<Annotation>>()
-        .await
-        .map_err(|e| format!("parse rows: {e}"))
+    let url = format!("{}/api/annotations/{}/{}/detach", get_host_url(), layer, id);
+    post_empty_json(&url, "detach annotation", "parse rows").await
 }
 
 /// A page of a table layer's rows, as text.
@@ -218,16 +123,7 @@ pub async fn fetch_table_rows(
         offset,
         limit
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("table rows: {e}"))?;
-    if !resp.ok() {
-        return Err(format!("table rows: status {}", resp.status()));
-    }
-    resp.json::<TablePage>()
-        .await
-        .map_err(|e| format!("parse table rows: {e}"))
+    get_json(&url, "table rows", "parse table rows").await
 }
 
 /// One numeric column paired with the label id of each row.
@@ -245,14 +141,5 @@ pub async fn fetch_table_column(layer: &str, name: &str) -> Result<TableColumnVa
         layer,
         name
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("table column: {e}"))?;
-    if !resp.ok() {
-        return Err(resp.text().await.unwrap_or_else(|_| "failed".into()));
-    }
-    resp.json::<TableColumnValues>()
-        .await
-        .map_err(|e| format!("parse table column: {e}"))
+    get_json(&url, "table column", "parse table column").await
 }

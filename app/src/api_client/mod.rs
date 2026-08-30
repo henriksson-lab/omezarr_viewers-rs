@@ -1,5 +1,6 @@
-use gloo_net::http::Request;
+use gloo_net::http::{Request, RequestBuilder, Response};
 use omezarr_viewer_common::{DatasetInfo, SessionInfo};
+use serde::{de::DeserializeOwned, Serialize};
 use wasm_bindgen::JsCast;
 
 mod annotations;
@@ -38,89 +39,192 @@ fn host_url() -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The request shapes
+//
+// Every call in this module is one of a handful of shapes: a URL, a verb, maybe
+// a JSON body, and a JSON or byte answer. Written out per call that is thirty
+// copies of the same six lines, each free to drift from the others.
+//
+// Two labels rather than one, because the two failures are not the same
+// problem and the message is all a user gets to tell them apart: `what` names
+// the request — what to say when it never left, or came back refused — and
+// `parsed` names the value this client could not read out of an answer the
+// server thought was fine.
+// ---------------------------------------------------------------------------
+
+/// Why a non-2xx answer was refused, in the server's own words where it gave
+/// any.
+///
+/// The body is where this server explains itself; the status number is what is
+/// left when it explained nothing.
+async fn refused(resp: Response, what: &str) -> String {
+    let status = resp.status();
+    match resp.text().await {
+        Ok(body) if !body.trim().is_empty() => format!("{what}: {}", body.trim()),
+        _ => format!("{what}: status {status}"),
+    }
+}
+
+/// The answer's JSON, or the reason there is none.
+async fn finish_json<T: DeserializeOwned>(
+    resp: Response,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    if !resp.ok() {
+        return Err(refused(resp, what).await);
+    }
+    resp.json::<T>().await.map_err(|e| format!("{parsed}: {e}"))
+}
+
+/// Send a request with no body and read JSON back.
+async fn send_json<T: DeserializeOwned>(
+    req: RequestBuilder,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    let resp = req.send().await.map_err(|e| format!("{what}: {e}"))?;
+    finish_json(resp, what, parsed).await
+}
+
+/// As `send_json`, with a JSON body — whose *encoding* is a third failure, and
+/// the one failure the server never saw.
+async fn send_body_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+    req: RequestBuilder,
+    body: &B,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    let resp = req
+        .json(body)
+        .map_err(|e| format!("{what} body: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("{what}: {e}"))?;
+    finish_json(resp, what, parsed).await
+}
+
+/// GET a JSON document.
+pub(crate) async fn get_json<T: DeserializeOwned>(
+    url: &str,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    send_json(Request::get(url), what, parsed).await
+}
+
+/// POST a JSON body and read JSON back.
+pub(crate) async fn post_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+    url: &str,
+    body: &B,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    send_body_json(Request::post(url), body, what, parsed).await
+}
+
+/// POST nothing and read JSON back — the endpoints whose URL is the whole ask.
+///
+/// Not `post_json` with an empty body: that would put a JSON document on the
+/// wire where these send none.
+pub(crate) async fn post_empty_json<T: DeserializeOwned>(
+    url: &str,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    send_json(Request::post(url), what, parsed).await
+}
+
+/// PUT a JSON body and read JSON back.
+pub(crate) async fn put_json<T: DeserializeOwned, B: Serialize + ?Sized>(
+    url: &str,
+    body: &B,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    send_body_json(Request::put(url), body, what, parsed).await
+}
+
+/// DELETE, reading the new state back.
+pub(crate) async fn delete_json<T: DeserializeOwned>(
+    url: &str,
+    what: &str,
+    parsed: &str,
+) -> Result<T, String> {
+    send_json(Request::delete(url), what, parsed).await
+}
+
+/// DELETE where the answer carries nothing worth reading.
+pub(crate) async fn delete_ok(url: &str, what: &str) -> Result<(), String> {
+    let resp = Request::delete(url)
+        .send()
+        .await
+        .map_err(|e| format!("{what}: {e}"))?;
+    if !resp.ok() {
+        return Err(refused(resp, what).await);
+    }
+    Ok(())
+}
+
+/// A GET that came back 2xx, handed over unread.
+///
+/// For the answers that are not JSON, and for the ones whose headers carry half
+/// the answer — `X-Total`, `X-Dtype`, `X-Width` — which is why the body is read
+/// by the caller rather than here.
+pub(crate) async fn get_ok(url: &str, what: &str) -> Result<Response, String> {
+    let resp = Request::get(url)
+        .send()
+        .await
+        .map_err(|e| format!("{what}: {e}"))?;
+    if !resp.ok() {
+        return Err(refused(resp, what).await);
+    }
+    Ok(resp)
+}
+
+/// The answer's bytes.
+pub(crate) async fn read_bytes(resp: Response, what: &str) -> Result<Vec<u8>, String> {
+    resp.binary().await.map_err(|e| format!("{what}: {e}"))
+}
+
 /// Fetch the open session: every layer, in draw order.
 pub async fn fetch_session() -> Result<SessionInfo, String> {
     let url = format!("{}/api/session", get_host_url());
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch session: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch session: status {}", resp.status()));
-    }
-    resp.json::<SessionInfo>()
-        .await
-        .map_err(|e| format!("parse session: {}", e))
+    get_json(&url, "fetch session", "parse session").await
 }
 
 /// Fetch the list of available datasets from the server.
 pub async fn fetch_datasets() -> Result<Vec<String>, String> {
     let url = format!("{}/api/datasets", get_host_url());
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch datasets: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch datasets: status {}", resp.status()));
-    }
-    resp.json::<Vec<String>>()
-        .await
-        .map_err(|e| format!("parse datasets: {}", e))
+    get_json(&url, "fetch datasets", "parse datasets").await
 }
 
 /// Open a dataset by name on the server, replacing the session.
 pub async fn open_dataset(name: &str) -> Result<DatasetInfo, String> {
     let url = format!("{}/api/open?dataset={}", get_host_url(), name);
-    let resp = Request::post(&url)
-        .send()
-        .await
-        .map_err(|e| format!("open dataset: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("open dataset: status {}", resp.status()));
-    }
-    resp.json::<DatasetInfo>()
-        .await
-        .map_err(|e| format!("parse dataset info: {}", e))
+    post_empty_json(&url, "open dataset", "parse dataset info").await
 }
 
 /// Add a layer from a source URI, returning the new session.
 pub async fn add_layer(source: &str, role: Option<&str>) -> Result<SessionInfo, String> {
     let url = format!("{}/api/layers", get_host_url());
     let body = serde_json::json!({ "source": source, "role": role });
-    let resp = Request::post(&url)
-        .json(&body)
-        .map_err(|e| format!("add layer body: {}", e))?
-        .send()
-        .await
-        .map_err(|e| format!("add layer: {}", e))?;
-    if !resp.ok() {
-        let detail = resp.text().await.unwrap_or_default();
-        return Err(format!("add layer: {}", detail));
-    }
-    resp.json::<SessionInfo>()
-        .await
-        .map_err(|e| format!("parse session: {}", e))
+    post_json(&url, &body, "add layer", "parse session").await
 }
 
 /// Remove a layer by id, returning the new session.
 pub async fn remove_layer(id: &str) -> Result<SessionInfo, String> {
     let url = format!("{}/api/layers/{}", get_host_url(), id);
-    let resp = Request::delete(&url)
-        .send()
-        .await
-        .map_err(|e| format!("remove layer: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("remove layer: status {}", resp.status()));
-    }
-    resp.json::<SessionInfo>()
-        .await
-        .map_err(|e| format!("parse session: {}", e))
+    delete_json(&url, "remove layer", "parse session").await
 }
 
 /// Fetch the session as a project file and hand it to the browser to save.
 ///
 /// The server returns JSON; turning it into a file is the browser's job, and
-/// doing it here keeps the server from writing anywhere on a click.
+/// doing it here keeps the server from writing anywhere on a click. Its own
+/// shape, because the answer is neither parsed nor kept — it goes straight into
+/// a blob.
 pub async fn download_project() -> Result<(), String> {
     let url = format!("{}/api/project", get_host_url());
     let resp = Request::get(&url)
@@ -212,16 +316,7 @@ pub async fn fetch_regions(
         objects,
         limit
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch regions: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch regions: status {}", resp.status()));
-    }
-    resp.json::<Vec<RegionCount>>()
-        .await
-        .map_err(|e| format!("parse regions: {}", e))
+    get_json(&url, "fetch regions", "parse regions").await
 }
 
 // ---------------------------------------------------------------------------

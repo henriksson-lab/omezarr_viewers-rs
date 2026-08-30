@@ -1,5 +1,7 @@
 use yew::prelude::*;
 
+use crate::controls::layer_header::LayerHeader;
+
 /// Props for a label layer's controls.
 #[derive(Properties, PartialEq)]
 pub struct LabelPanelProps {
@@ -22,13 +24,6 @@ pub struct LabelPanelProps {
 /// Controls for one label layer: opacity, outline mode, and what is selected.
 #[function_component(LabelPanel)]
 pub fn label_panel(props: &LabelPanelProps) -> Html {
-    let on_visibility = {
-        let cb = props.on_visibility.clone();
-        Callback::from(move |e: Event| {
-            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-            cb.emit(input.checked());
-        })
-    };
     let on_opacity = {
         let cb = props.on_opacity.clone();
         Callback::from(move |e: InputEvent| {
@@ -56,20 +51,15 @@ pub fn label_panel(props: &LabelPanelProps) -> Html {
         let cb = props.on_clear_selection.clone();
         Callback::from(move |_: MouseEvent| cb.emit(()))
     };
-    let on_remove = {
-        let cb = props.on_remove.clone();
-        Callback::from(move |_: MouseEvent| cb.emit(()))
-    };
 
     html! {
         <div class="channel-control">
-            <div class="channel-header">
-                <label>
-                    <input type="checkbox" checked={props.visible} onchange={on_visibility} />
-                    { format!(" {}", props.name) }
-                </label>
-                <button class="layer-remove" onclick={on_remove} title="Close layer">{"\u{2715}"}</button>
-            </div>
+            <LayerHeader
+                name={props.name.clone()}
+                visible={Some(props.visible)}
+                on_visibility={props.on_visibility.clone()}
+                on_remove={props.on_remove.clone()}
+            />
             <div class="slider-row">
                 <span>{"Opacity"}</span>
                 <input type="range" min="0" max="1" step="0.01"

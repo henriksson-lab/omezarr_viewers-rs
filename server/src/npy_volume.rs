@@ -18,51 +18,16 @@ use omezarr_viewer_common::{
 };
 use std::path::Path;
 
+use crate::npy_header;
 use crate::source::{SourceRegistry, SourceSpec};
 use crate::zarr_reader::{
     bytes_to_f32, PlaneAxis, PlaneBytes, PlaneRequest, Projection, TileBytes, TileEncoding,
     TileRequest,
 };
 
-/// What a `.npy` file holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NpyKind {
-    /// A 2D or 3D array of pixels — a mask, a density, a plane.
-    Volume,
-    /// A table of objects: a structured array, or `(N, k)` with a small `k`.
-    Objects,
-}
-
-/// Decide which reader a `.npy` belongs to, from its header alone.
-///
-/// The distinction is real and cannot be guessed from the extension:
-/// `clearmap-ng` writes masks and cell tables as `.npy` alike. The rules, in
-/// order:
-///
-/// * a **structured** dtype names fields — that is a table, always;
-/// * `(N,)` is a table of one column;
-/// * `(N, k)` with `k <= 4` is a point list — a volume that narrow is not a
-///   picture of anything;
-/// * anything else is a volume.
-pub fn classify(header_bytes: &[u8]) -> Result<NpyKind> {
-    let text = header_text(header_bytes)?;
-    let descr = value_of(&text, "descr").context("the header names no dtype")?;
-    if descr.trim_start().starts_with('[') {
-        return Ok(NpyKind::Objects);
-    }
-    let dims: Vec<u64> = value_of(&text, "shape")
-        .context("the header names no shape")?
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split(',')
-        .filter_map(|part| part.trim().parse::<u64>().ok())
-        .collect();
-    Ok(match dims.as_slice() {
-        [_] => NpyKind::Objects,
-        [_, k] if *k <= 4 => NpyKind::Objects,
-        _ => NpyKind::Volume,
-    })
-}
+// The header layer lives in `npy_header`, which decides this before a reader
+// exists; re-exported so `npy_volume::classify` still names it.
+pub use crate::npy_header::{classify, NpyKind};
 
 /// Where the array's bytes live.
 #[derive(Debug)]
@@ -360,107 +325,26 @@ struct Header {
     little_endian: bool,
 }
 
-/// The header dictionary and where the data starts.
-fn header_span(bytes: &[u8]) -> Result<(String, usize)> {
-    if bytes.len() < 12 || &bytes[..6] != b"\x93NUMPY" {
-        bail!("this file does not start with the NumPy magic");
-    }
-    let (header_len, start) = if bytes[6] == 1 {
-        (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10usize)
-    } else {
-        (
-            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
-            12usize,
-        )
-    };
-    let end = start + header_len;
-    if bytes.len() < end {
-        bail!("the .npy header runs past the end of the file");
-    }
-    Ok((
-        String::from_utf8_lossy(&bytes[start..end]).into_owned(),
-        end,
-    ))
-}
-
-fn header_text(bytes: &[u8]) -> Result<String> {
-    Ok(header_span(bytes)?.0)
-}
-
 impl Header {
     fn parse(bytes: &[u8]) -> Result<Self> {
-        let (text, end) = header_span(bytes)?;
+        let split = npy_header::split(bytes)?;
+        npy_header::require_c_order(&split.dict)?;
+        let (dtype, width, little_endian) = npy_header::scalar(&npy_header::descr(&split.dict)?)?;
 
-        if value_of(&text, "fortran_order")
-            .map(|v| v.contains("True"))
-            .unwrap_or(false)
-        {
-            bail!("this array is Fortran-ordered; write it C-ordered (np.ascontiguousarray)");
-        }
-        let descr = value_of(&text, "descr").context("the header names no dtype")?;
-        let descr = descr.trim().trim_matches(|c| c == '\'' || c == '"');
-        let (dtype, width, little_endian) = scalar(descr)?;
-
-        let dims: Vec<u64> = value_of(&text, "shape")
-            .context("the header names no shape")?
-            .trim_start_matches('(')
-            .trim_end_matches(')')
-            .split(',')
-            .filter_map(|part| part.trim().parse::<u64>().ok())
-            .collect();
-        let shape = match dims.as_slice() {
+        let shape = match npy_header::shape(&split.dict)?.as_slice() {
             [z, y, x] => [*z, *y, *x],
             [y, x] => [1, *y, *x],
             other => bail!("a volume is 2D or 3D; this array is {other:?}"),
         };
 
         Ok(Self {
-            offset: end,
+            offset: split.offset,
             shape,
             dtype,
             width,
             little_endian,
         })
     }
-}
-
-/// A NumPy scalar descriptor as `(dtype name, width, little-endian)`.
-fn scalar(descr: &str) -> Result<(String, usize, bool)> {
-    let (little_endian, rest) = match descr.chars().next() {
-        Some('>') => (false, &descr[1..]),
-        Some('<') | Some('|') | Some('=') => (true, &descr[1..]),
-        _ => (true, descr),
-    };
-    let kind = rest.chars().next().context("dtype names no kind")?;
-    let width: usize = rest[1..].parse().context("dtype names no width")?;
-    let name = match (kind, width) {
-        ('u', 1) => "uint8",
-        ('u', 2) => "uint16",
-        ('u', 4) => "uint32",
-        ('u', 8) => "uint64",
-        ('i', 1) => "int8",
-        ('i', 2) => "int16",
-        ('i', 4) => "int32",
-        ('i', 8) => "int64",
-        ('f', 4) => "float32",
-        ('f', 8) => "float64",
-        ('b', 1) => "uint8",
-        _ => bail!("dtype `{descr}` is not one this reads"),
-    };
-    Ok((name.to_string(), width, little_endian))
-}
-
-fn value_of(header: &str, key: &str) -> Option<String> {
-    let needle = format!("'{key}':");
-    let at = header.find(&needle)? + needle.len();
-    let rest = header[at..].trim_start();
-    let end = match rest.chars().next()? {
-        '(' => rest.find(')')? + 1,
-        '[' => rest.rfind(']')? + 1,
-        '\'' => rest[1..].find('\'')? + 2,
-        _ => rest.find(',').unwrap_or(rest.len()),
-    };
-    Some(rest[..end].trim().to_string())
 }
 
 /// Describe the array as a one-level OME-Zarr dataset, so the frontend needs
@@ -508,20 +392,7 @@ fn describe(header: &Header) -> DatasetInfo {
 mod tests {
     use super::*;
 
-    fn npy(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
-        let dict = format!("{{'descr': '{descr}', 'fortran_order': False, 'shape': {shape}, }}");
-        let mut header = dict.into_bytes();
-        while !(10 + header.len() + 1).is_multiple_of(64) {
-            header.push(b' ');
-        }
-        header.push(b'\n');
-        let mut out = Vec::new();
-        out.extend_from_slice(b"\x93NUMPY\x01\x00");
-        out.extend_from_slice(&(header.len() as u16).to_le_bytes());
-        out.extend_from_slice(&header);
-        out.extend_from_slice(data);
-        out
-    }
+    use crate::npy_header::write as npy;
 
     /// `value_at(z, y, x)` for the fixture below.
     fn value(z: u64, y: u64, x: u64) -> u16 {
@@ -538,7 +409,7 @@ mod tests {
                 }
             }
         }
-        let bytes = npy("<u2", "(3, 4, 5)", &data);
+        let bytes = npy("'<u2'", "(3, 4, 5)", &data);
         NpyVolume::from_bytes(Storage::Owned(bytes)).expect("volume")
     }
 
@@ -658,7 +529,7 @@ mod tests {
     #[test]
     fn a_two_dimensional_array_is_one_plane() {
         let data: Vec<u8> = (0..6u8).flat_map(|v| (v as u16).to_le_bytes()).collect();
-        let bytes = npy("<u2", "(2, 3)", &data);
+        let bytes = npy("'<u2'", "(2, 3)", &data);
         let volume = NpyVolume::from_bytes(Storage::Owned(bytes)).expect("volume");
         assert_eq!(volume.metadata().arrays[0].shape, vec![1, 1, 2, 3]);
     }
@@ -666,7 +537,7 @@ mod tests {
     #[test]
     fn big_endian_arrays_come_back_little_endian() {
         let data: Vec<u8> = [258u16, 3].iter().flat_map(|v| v.to_be_bytes()).collect();
-        let bytes = npy(">u2", "(1, 2)", &data);
+        let bytes = npy("'>u2'", "(1, 2)", &data);
         let volume = NpyVolume::from_bytes(Storage::Owned(bytes)).expect("volume");
         let tile = volume
             .read_tile_bytes(&TileRequest::new(0, 0, 0, 1, 2))
@@ -676,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_truncated_file_is_refused_by_name() {
-        let bytes = npy("<u2", "(3, 4, 5)", &[0u8; 4]);
+        let bytes = npy("'<u2'", "(3, 4, 5)", &[0u8; 4]);
         let err = NpyVolume::from_bytes(Storage::Owned(bytes)).expect_err("refused");
         assert!(format!("{err}").contains("element"), "{err}");
     }

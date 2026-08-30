@@ -1,7 +1,7 @@
 use omezarr_viewer_common::{ObjectColumn, ObjectSchema};
 use yew::prelude::*;
 
-use crate::controls::channel_panel::{color_to_hex, hex_to_color};
+use crate::controls::layer_header::LayerHeader;
 
 /// Props for an object layer's controls.
 #[derive(Properties, PartialEq)]
@@ -38,22 +38,6 @@ pub struct ObjectPanelProps {
 /// Controls for one object layer: how the points look, and which ones show.
 #[function_component(ObjectPanel)]
 pub fn object_panel(props: &ObjectPanelProps) -> Html {
-    let on_visibility = {
-        let cb = props.on_visibility.clone();
-        Callback::from(move |e: Event| {
-            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-            cb.emit(input.checked());
-        })
-    };
-    let on_color = {
-        let cb = props.on_color.clone();
-        Callback::from(move |e: Event| {
-            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-            if let Some(color) = hex_to_color(&input.value()) {
-                cb.emit(color);
-            }
-        })
-    };
     let slider = |cb: Callback<f32>| {
         Callback::from(move |e: InputEvent| {
             let input: web_sys::HtmlInputElement = e.target_unchecked_into();
@@ -76,22 +60,17 @@ pub fn object_panel(props: &ObjectPanelProps) -> Html {
             cb.emit(input.value().parse::<usize>().ok());
         })
     };
-    let on_remove = {
-        let cb = props.on_remove.clone();
-        Callback::from(move |_: MouseEvent| cb.emit(()))
-    };
 
     html! {
         <div class="channel-control">
-            <div class="channel-header">
-                <label>
-                    <input type="checkbox" checked={props.visible} onchange={on_visibility} />
-                    { format!(" {}", props.name) }
-                </label>
-                <input type="color" class="color-picker"
-                    value={color_to_hex(&props.color)} onchange={on_color} />
-                <button class="layer-remove" onclick={on_remove} title="Close layer">{"\u{2715}"}</button>
-            </div>
+            <LayerHeader
+                name={props.name.clone()}
+                visible={Some(props.visible)}
+                on_visibility={props.on_visibility.clone()}
+                color={Some(props.color)}
+                on_color={props.on_color.clone()}
+                on_remove={props.on_remove.clone()}
+            />
 
             <div class="slider-row">
                 <span>{"Size"}</span>

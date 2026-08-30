@@ -429,3 +429,60 @@ async fn a_layer_id_is_not_reused_after_a_delete() {
     let id = api.open(&api.store.clone(), LayerRole::Image).await;
     assert_eq!(id, "L1");
 }
+
+// ---------------------------------------------------------------------------
+// Resolving a layer, across every route that names one
+//
+// These two sweep the whole API rather than one route, because the bug they
+// pin was a disagreement *between* routes: the same pair of requests — an id
+// nothing answers to, and an open layer of the wrong kind — came back 404/400
+// from /api/tile and 404/404 from /api/value, so no client could read one rule
+// off the API. One helper decides it now; these say what it decided.
+// ---------------------------------------------------------------------------
+
+/// Every route that names a layer, with `LAYER` standing in for the id, and the
+/// kind of layer that is *wrong* for it.
+const LAYER_ROUTES: [(&str, &str); 8] = [
+    (
+        "/api/tile?layer=LAYER&level=0&z=0&y=0&x=0&h=8&w=8",
+        "objects",
+    ),
+    ("/api/slice?layer=LAYER&level=0&index=0", "objects"),
+    ("/api/value?layer=LAYER&level=0&z=0&y=0&x=0", "objects"),
+    ("/api/objects?layer=LAYER&y0=0&y1=9&x0=0&x1=9", "image"),
+    ("/api/objects/at?layer=LAYER&y=1&x=1", "image"),
+    ("/api/tables/LAYER/rows", "image"),
+    ("/api/tables/LAYER/column?name=area", "image"),
+    ("/api/annotations/LAYER", "image"),
+];
+
+#[actix_web::test]
+async fn an_unknown_layer_id_is_a_404_that_names_it_on_every_route() {
+    let api = Api::with_objects().await;
+    for (route, _) in LAYER_ROUTES {
+        let res = api.get(&route.replace("LAYER", "L99")).await;
+        assert_eq!(res.status, 404, "{route}: {} {}", res.status, res.text());
+        // The handler's 404, not the router's: an unmatched route answers with
+        // an empty body and would pass the status check while proving nothing.
+        assert!(
+            res.text().contains("L99"),
+            "{route}: the body must name the id: `{}`",
+            res.text()
+        );
+    }
+}
+
+#[actix_web::test]
+async fn a_layer_of_the_wrong_kind_is_a_400_that_names_it_on_every_route() {
+    let api = Api::with_objects().await;
+    for (route, wrong) in LAYER_ROUTES {
+        let layer = api.layer_of_kind(wrong).await;
+        let res = api.get(&route.replace("LAYER", &layer)).await;
+        assert_eq!(res.status, 400, "{route}: {} {}", res.status, res.text());
+        assert!(
+            res.text().contains(&layer),
+            "{route}: the body must name the layer: `{}`",
+            res.text()
+        );
+    }
+}

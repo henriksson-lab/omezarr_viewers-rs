@@ -4,7 +4,8 @@
 use omezarr_viewer_common::{in_tree_order, Annotation, Geometry, ObjectType};
 use yew::prelude::*;
 
-use crate::controls::channel_panel::{color_to_hex, hex_to_color};
+use crate::controls::channel_panel::color_to_hex;
+use crate::controls::layer_header::LayerHeader;
 
 /// Props for an annotation layer's controls.
 #[derive(Properties, PartialEq)]
@@ -161,19 +162,6 @@ pub fn annot_panel(props: &AnnotPanelProps) -> Html {
 /// The layer as a whole: what it is called, how it is drawn, and which class is
 /// being looked at.
 fn layer_section(props: &AnnotPanelProps) -> Html {
-    let on_color = {
-        let cb = props.on_color.clone();
-        Callback::from(move |e: Event| {
-            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-            if let Some(color) = hex_to_color(&input.value()) {
-                cb.emit(color);
-            }
-        })
-    };
-    let on_remove = {
-        let cb = props.on_remove.clone();
-        Callback::from(move |_: MouseEvent| cb.emit(()))
-    };
     let on_filter = {
         let cb = props.on_filter.clone();
         Callback::from(move |e: Event| {
@@ -190,19 +178,15 @@ fn layer_section(props: &AnnotPanelProps) -> Html {
     };
     html! {
         <>
-        <div class="channel-header">
-            <label>
-                <input type="checkbox" checked={props.visible}
-                    onchange={checkbox(props.on_visibility.clone())} />
-                { format!(" {}", props.name) }
-                if props.dirty {
-                    <span class="dirty-dot" title="unsaved changes">{"\u{25cf}"}</span>
-                }
-            </label>
-            <input type="color" class="color-picker"
-                value={color_to_hex(&props.color)} onchange={on_color} />
-            <button class="layer-remove" onclick={on_remove} title="Close layer">{"\u{2715}"}</button>
-        </div>
+        <LayerHeader
+            name={props.name.clone()}
+            visible={Some(props.visible)}
+            on_visibility={props.on_visibility.clone()}
+            color={Some(props.color)}
+            on_color={props.on_color.clone()}
+            dirty={props.dirty}
+            on_remove={props.on_remove.clone()}
+        />
 
         // What the *next* shape gets. `objectType` is QuPath's processing
         // role, not the semantic kind — the kind is the class beside it —

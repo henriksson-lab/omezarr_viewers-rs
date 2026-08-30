@@ -671,17 +671,24 @@ async fn every_route_answers_404_for_a_layer_that_does_not_exist() {
 
 #[actix_web::test]
 async fn an_image_layer_is_not_an_annotation_layer() {
-    // The id resolves; the layer just holds no annotations. That has to be a
-    // 404 rather than an empty list, or a client would draw into a picture.
+    // The id resolves; the layer just holds no annotations. Refused either way
+    // — an empty list would let a client draw into a picture — but with the
+    // status for the wrong kind of layer, not the one for a layer that is gone.
     let api = Api::with_annotations().await;
     let image = api.layer_of_kind("image").await;
 
-    let res = api.get(&format!("/api/annotations/{image}")).await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND, "{}", res.text());
-    let res = api
-        .post(&format!("/api/annotations/{image}"), body(&point(1.0, 1.0)))
-        .await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND, "{}", res.text());
+    for res in [
+        api.get(&format!("/api/annotations/{image}")).await,
+        api.post(&format!("/api/annotations/{image}"), body(&point(1.0, 1.0)))
+            .await,
+    ] {
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+        assert!(
+            res.text().contains(&image) && res.text().contains("holds no annotations"),
+            "the body should name the layer and what it lacks: {}",
+            res.text()
+        );
+    }
 }
 
 #[actix_web::test]

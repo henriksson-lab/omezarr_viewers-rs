@@ -19,7 +19,6 @@ debugging time:
 
 import json
 import os
-import socket
 import subprocess
 import sys
 import tempfile
@@ -30,7 +29,7 @@ import urllib.request
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cdp import SHIFT, Browser  # noqa: E402
+from cdp import SHIFT, Browser, free_port  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -54,12 +53,6 @@ def binary(name):
         if os.path.exists(path):
             return path
     raise RuntimeError(f"target/{{release,debug}}/{name} not built — run `make build`")
-
-
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def demo_store(directory):

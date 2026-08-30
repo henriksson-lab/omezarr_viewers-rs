@@ -78,10 +78,10 @@ rather than on status codes, headers, or anything the UI never calls.
 Each is real and none is fixed; each is a judgement call about what the API
 should promise rather than a defect with one obvious answer.
 
-- [ ] **An out-of-range `level` is a 500 from `/api/tile` and `/api/value` but a
-      400 from `/api/slice`.** `slice` validates first; the others discover it
-      inside the reader and blanket-map anyhow to `InternalServerError`. A
-      frontend that retries 5xx retries forever.
+- [x] **An out-of-range `level` is a 500 from `/api/tile` and `/api/value` but a
+      400 from `/api/slice`.** Fixed by task 8: all three validate the level
+      before reading, and `a_level_outside_the_dataset_is_a_400_from_every_pixel_route`
+      sweeps all three.
 - [ ] **An out-of-range channel returns 200 and a black tile.** `c=9` on a
       2-channel image comes back as fill-value pixels, indistinguishable from
       data that is genuinely black, because zarrs pads the out-of-bounds subset.
@@ -98,9 +98,11 @@ should promise rather than a defect with one obvious answer.
 - [ ] **`/api/tables/{layer}/column` returns the same 400 and the same message**
       for a column that does not exist and one that is text, so a client cannot
       tell a typo from a type mismatch.
-- [ ] **Naming a pixel-less layer is 400 from `/tile` and `/slice` but 404 from
+- [x] **Naming a pixel-less layer is 400 from `/tile` and `/slice` but 404 from
       `/value`**, and a 404 from `/objects` does not distinguish "no such layer"
-      from "that layer has no objects".
+      from "that layer has no objects". Fixed by task 8: unknown id is 404 and
+      names it, wrong kind is 400 and names what the layer lacks, on every
+      route.
 
 The theme is one thing: the status-code decisions in `api.rs` were never
 uniform, and until now nothing was in a position to notice.
@@ -306,3 +308,93 @@ three lines above them — reachable from neither an argument nor a file.
   gives them a stable home.
 - **Feature gaps.** Tracked in `README.md` under "Known gaps"; this file is
   about the quality of what exists, not what is missing.
+
+---
+
+## 8. The duplication, measured and removed
+
+A normalised clone detector over `server/src`, `app/src` and `src` found **71
+repeated blocks of >=8 lines**. Five clusters were real; the rest were field
+lists and match arms. **42 remain**, all in the noise category.
+
+- [x] **`api.rs`'s layer-resolution preamble, 17 call sites across 15
+      handlers.** The copies had drifted, which is *why* the status codes were
+      inconsistent — so this was one defect, not two. One `resolve_store` plus
+      its object/table/annotation siblings, and a taxonomy applied everywhere:
+      unknown id 404 naming it, wrong kind 400 naming what it lacks, caller
+      value out of range 400. Two sweeps in `api_session.rs` walk all eight
+      layer-naming route shapes so the next drift fails a test.
+- [x] **Two `.npy` header parsers.** `value_of` was byte-identical in
+      `npy_volume.rs` and `objects/npy.rs`; the magic/length/dict-text handling
+      was the same job written twice. Now `server/src/npy_header.rs`, which also
+      houses `classify` — deciding "volume or table" is a question about the
+      header. `npy_volume.rs` 697 -> 568, `objects/npy.rs` 418 -> 362. It
+      surfaced a latent bug: the pre-magic guard was `< 12` in one reader and
+      `< 10` in the other, and neither is right (v1 needs 10, v2 needs 12).
+- [x] **The `.npy` test writer, 4x -> 1x** (`convert.rs` twice, plus both
+      readers). The copies disagreed about whether `descr` arrived quoted;
+      reconciled toward the form that can also express a structured dtype.
+- [x] **`app/src/api_client` request boilerplate, 22 call sites.** 909 -> 832
+      lines including ~150 lines of new shared code, so the call sites
+      themselves roughly halved. Every error label kept its specificity.
+- [x] **Three WebGL buffer uploads** onto one `upload_vertex_buffer`, plus a
+      uniform-setting pair the detector found alongside them. The `unsafe`
+      `Float32Array::view` now carries the `SAFETY:` comment it never had: the
+      view borrows wasm linear memory, and any allocation can move it.
+
+**Acceptance:** the browser suites pass unchanged — they assert on pixels, so
+they are what proves the renderer refactor draws the same thing. 288 Rust tests,
+76 browser assertions, clippy and fmt clean.
+
+---
+
+## 9. The second round: shared contract types, and `api.rs` split
+
+Re-measuring after task 8 found four clusters left that were not noise, plus the
+file the ≤800-line rule had never been applied to.
+
+- [x] **`api.rs` split.** 1436 lines -> `server/src/api/` in six modules,
+      largest 439. `configure()` is byte-identical (verified by `diff` against
+      HEAD) because its route *order* is behaviour. Two modules are named
+      `object_routes.rs` / `annotation_routes.rs` rather than `objects` /
+      `annotations`: an actix route macro expands to a struct named after the
+      handler, and a module would shadow it in the type namespace — which
+      `desktop/src/main.rs` would have discovered, since it registers services
+      by hand.
+- [x] **`TileCoords` in the shared crate.** The same eight numbers were declared
+      four times, and the projection beside them three different ways —
+      `(kind, depth)` outbound, `(kind, z0, z1)` in the cache key, a bare
+      `depth` in the query. Converting between those is where one of task 7's
+      four overflow panics lived; `TileCoords::z_range` now does it once, and
+      saturates.
+      **Not applied to `zarr_reader::TileRequest`**, deliberately: it is an
+      internal type with a builder API whose doc says the builder exists so "a
+      tenth positional `u64` is a bug waiting for a caller to transpose two of
+      them". Embedding would have turned ~29 reader field reads into
+      `.coords.` for no gain. `TileQuery` converts rather than embeds, because
+      `web::Query` goes through `serde_urlencoded`, which cannot flatten — tested,
+      not assumed.
+- [x] **`ObjectRegion` shared.** The client's `ObjectRegion` and the server's
+      `ObjectQuery` were field-for-field identical. One type now, re-exported
+      server-side under its own word for it.
+- [x] **`LayerHeader` component.** Four of the five panels adopted it;
+      `channel_panel` was deliberately left alone, because its checkbox is a
+      *sibling* of the label rather than nested in it and it has no remove
+      button at all — serving it would have needed the three-flag component that
+      is worse than one honest exception.
+- [x] **`zarr_reader`'s local/async metadata twins.** Diffed line by line first:
+      no hidden asymmetry, only the two `open` calls. Shared assembly extracted
+      on the `assemble_anndata` precedent; the fetching stays written twice,
+      because no generic unifies zarrs' sync and async storage traits.
+
+**Two of these made their file bigger, and that is the honest result:**
+`zarr_reader.rs` 813 -> 837 and `app/src/controls/` 1299 -> 1328. Extracting a
+small clone costs a struct and a doc comment; what it buys is that adding a
+field touches one place. Worth it here, and worth saying plainly rather than
+quoting only the flattering number.
+
+**Result:** duplication 71 -> 36 blocks of >=8 lines across the two rounds.
+`api.rs` is no longer the largest file in the repo — `src/annotation.rs` (1017)
+and `annotations/geojson.rs` (990) are, and neither has been split.
+288 Rust tests, 76 browser assertions, clippy and fmt clean.
+

@@ -182,10 +182,15 @@ async fn asking_an_image_layer_for_rows_fails_cleanly() {
     let (api, _) = with_feature_table().await;
     let image = api.layer_of_kind("image").await;
     let res = api.get(&format!("/api/tables/{image}/rows")).await;
-    // The layer exists but holds no table. A 404 that names it is the answer;
-    // a 500, or an empty table pretending to be one, is not.
-    assert_eq!(res.status, 404, "{} {}", res.status, res.text());
-    assert!(res.text().contains(&image), "{}", res.text());
+    // The layer exists and is the wrong kind: a 400 that names it, not the 404
+    // an id nobody has gets, and certainly not a 500 or an empty table
+    // pretending to be one.
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
+    assert!(
+        res.text().contains(&image) && res.text().contains("is not a table"),
+        "{}",
+        res.text()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +296,10 @@ async fn asking_an_image_layer_for_a_column_fails_cleanly() {
     let res = api
         .get(&format!("/api/tables/{image}/column?name=area"))
         .await;
-    assert_eq!(res.status, 404, "{} {}", res.status, res.text());
+    // Wrong kind of layer, not a missing one — the same 400 the rows route
+    // gives, so a client reads one rule off both.
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
+    assert!(res.text().contains("is not a table"), "{}", res.text());
 }
 
 // ---------------------------------------------------------------------------
@@ -378,8 +386,8 @@ async fn the_literal_tables_route_is_not_swallowed_by_the_layer_route() {
     let api = Api::empty().await;
     let res = api.get("/api/annotations/tables").await;
     // With no layer open at all, `GET /api/annotations/{layer}` could only
-    // answer 404 "no annotation layer tables". A 200 carrying the listing's
-    // own keys is proof the literal route matched first.
+    // answer 404 "no layer tables". A 200 carrying the listing's own keys is
+    // proof the literal route matched first.
     assert!(res.is_ok(), "{} {}", res.status, res.text());
     let body = res.json();
     assert!(

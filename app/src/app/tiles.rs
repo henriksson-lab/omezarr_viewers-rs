@@ -3,6 +3,8 @@
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
+use omezarr_viewer_common::TileCoords;
+
 use crate::api_client::{self, TileAddress};
 use crate::layers::{LayerState, LayerUi};
 use crate::ortho_pane::OrthoLayer;
@@ -426,14 +428,16 @@ impl App {
                     self.tiles_pending += 1;
 
                     let address = TileAddress {
-                        level,
-                        t,
-                        c: channel as u64,
-                        z,
-                        y: y_start,
-                        x: x_start,
-                        h,
-                        w,
+                        coords: TileCoords {
+                            level,
+                            t,
+                            c: channel as u64,
+                            z,
+                            y: y_start,
+                            x: x_start,
+                            h,
+                            w,
+                        },
                         // A label layer is never projected: the maximum of
                         // a set of ids is not an id.
                         projection: (!is_labels_layer).then_some(projection).flatten(),

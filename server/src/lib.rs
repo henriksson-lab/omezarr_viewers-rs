@@ -7,6 +7,7 @@ pub mod annotations;
 pub mod api;
 pub mod cache;
 pub mod convert;
+pub mod npy_header;
 pub mod npy_volume;
 pub mod objects;
 pub mod ontology;

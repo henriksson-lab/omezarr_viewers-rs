@@ -628,14 +628,46 @@ pub async fn list_s3_datasets(config: &S3Config) -> Result<Vec<String>> {
 
 type Attributes = serde_json::Map<String, serde_json::Value>;
 
+/// What a metadata read has to fetch, whichever store it came from.
+///
+/// The assembly below is the same either way; only the opening of the group
+/// and of each level array differs, and those are two different storage traits
+/// that no generic unifies — which is the whole reason this is a struct rather
+/// than two copies of the logic.
+struct MetadataParts {
+    /// The group's own attributes, handed back to the caller untouched.
+    attrs: Attributes,
+    /// The multiscales those attributes declared.
+    multiscales: Vec<Multiscale>,
+    /// One summary per dataset of `multiscales[0]`, in that order.
+    arrays: Vec<ArrayInfo>,
+}
+
+/// Turn fetched metadata parts into the dataset description.
+fn assemble_metadata(parts: MetadataParts) -> (DatasetInfo, Attributes) {
+    let MetadataParts {
+        attrs,
+        multiscales,
+        arrays,
+    } = parts;
+    let omero: Option<OmeroMetadata> = attrs
+        .get("omero")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    (
+        DatasetInfo {
+            metadata: DatasetMetadata { multiscales, omero },
+            arrays,
+        },
+        attrs,
+    )
+}
+
 /// Read OME-Zarr metadata from a local filesystem store.
 fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<(DatasetInfo, Attributes)> {
     let group = Group::open(store.clone(), "/").context("Failed to open zarr group")?;
     let attrs = group.attributes().clone();
     let multiscales = parse_multiscales(&attrs)?;
-    let omero: Option<OmeroMetadata> = attrs
-        .get("omero")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let mut arrays = Vec::new();
     for dataset in &multiscales[0].datasets {
@@ -645,13 +677,11 @@ fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<(DatasetInfo, Att
         arrays.push(array_info(array.shape(), &array));
     }
 
-    Ok((
-        DatasetInfo {
-            metadata: DatasetMetadata { multiscales, omero },
-            arrays,
-        },
+    Ok(assemble_metadata(MetadataParts {
         attrs,
-    ))
+        multiscales,
+        arrays,
+    }))
 }
 
 /// Read OME-Zarr metadata from an opendal-backed store.
@@ -660,11 +690,7 @@ async fn read_metadata_async(store: &Arc<AsyncOpendalStore>) -> Result<(DatasetI
         .await
         .context("Failed to open zarr group")?;
     let attrs = group.attributes().clone();
-
     let multiscales = parse_multiscales(&attrs)?;
-    let omero: Option<OmeroMetadata> = attrs
-        .get("omero")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let mut arrays = Vec::new();
     for dataset in &multiscales[0].datasets {
@@ -675,13 +701,11 @@ async fn read_metadata_async(store: &Arc<AsyncOpendalStore>) -> Result<(DatasetI
         arrays.push(array_info(array.shape(), &array));
     }
 
-    Ok((
-        DatasetInfo {
-            metadata: DatasetMetadata { multiscales, omero },
-            arrays,
-        },
+    Ok(assemble_metadata(MetadataParts {
         attrs,
-    ))
+        multiscales,
+        arrays,
+    }))
 }
 
 /// Summarise one opened array for the API.

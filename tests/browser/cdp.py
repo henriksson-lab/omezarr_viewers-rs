@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -28,38 +29,93 @@ WEBGL_FLAGS = ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
 SHIFT = 8
 
 
+def free_port():
+    """A port nobody is listening on.
+
+    Asked of the kernel rather than derived from the pid: a hash of the pid
+    collides, and a Chrome that cannot bind its debugging port exits silently,
+    which presented as "chrome did not come up" with nothing to go on.
+    """
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 class Browser:
     """One headless Chrome, on a port nobody else is using."""
 
-    def __init__(self, size=(1500, 1400), port=None):
-        # A port of our own, derived from the pid: other sessions on the same
-        # machine run their own headless Chrome, and attaching to somebody
-        # else's page target is a confusing way to fail — it presents as a
-        # window size nobody asked for.
-        self.port = port or 9400 + (os.getpid() % 500)
-        self.profile = tempfile.mkdtemp(prefix="omezarr-cdp-")
-        self.proc = subprocess.Popen(
-            [
-                chrome_binary(),
-                "--headless=new",
-                f"--remote-debugging-port={self.port}",
-                f"--user-data-dir={self.profile}",
-                f"--window-size={size[0]},{size[1]}",
-                *WEBGL_FLAGS,
-                "--no-sandbox",
-                "--disable-gpu-sandbox",
-                "--hide-scrollbars",
-                "about:blank",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+    def __init__(self, size=(1500, 1400), port=None, attempts=3):
+        # Set first so `close()` is safe even if the launch below never gets
+        # off the ground.
+        self.proc = None
+        self.profile = None
+        self.log = None
+        self.ws = None
         self.id = 0
-        self.ws = self._attach()
+        # Resolved once, outside the retry loop: a browser that is not
+        # installed will not become installed on the second attempt, and three
+        # copies of that message buries it.
+        self.binary = chrome_binary()
+
+        failures = []
+        for attempt in range(1, attempts + 1):
+            try:
+                self._launch(size, port)
+                self.ws = self._attach()
+                return
+            except RuntimeError as error:
+                failures.append(f"attempt {attempt}: {error}")
+                self._stop()
+        raise RuntimeError(
+            "chrome would not start.\n  " + "\n  ".join(failures)
+        )
+
+    def _launch(self, size, port):
+        """Start one Chrome, with its output kept rather than discarded."""
+        # A port of our own: other sessions on the same machine run their own
+        # headless Chrome, and attaching to somebody else's page target is a
+        # confusing way to fail — it presents as a window size nobody asked for.
+        self.port = port or free_port()
+        self.profile = tempfile.mkdtemp(prefix="omezarr-cdp-")
+        # Chrome's diagnostics go to a file rather than to DEVNULL. When it
+        # refuses to start, its own stderr is the only thing that says why, and
+        # throwing that away turned every startup failure into a bare
+        # "chrome did not come up" — which is what it did on CI.
+        self.log = tempfile.NamedTemporaryFile(
+            prefix="omezarr-chrome-", suffix=".log", delete=False
+        )
+        self.command = [
+            self.binary,
+            "--headless=new",
+            f"--remote-debugging-port={self.port}",
+            f"--user-data-dir={self.profile}",
+            f"--window-size={size[0]},{size[1]}",
+            *WEBGL_FLAGS,
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-gpu-sandbox",
+            # /dev/shm is small on a CI runner, and Chrome's default is to put
+            # its shared memory there; when it does not fit, Chrome dies during
+            # startup rather than reporting anything useful.
+            "--disable-dev-shm-usage",
+            "--hide-scrollbars",
+            "about:blank",
+        ]
+        self.proc = subprocess.Popen(
+            self.command, stdout=self.log, stderr=subprocess.STDOUT
+        )
 
     def _attach(self, timeout=30.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
+            # A Chrome that has already exited will never open the port, so say
+            # so now instead of waiting out the timeout.
+            code = self.proc.poll()
+            if code is not None:
+                raise RuntimeError(
+                    f"chrome exited with status {code} before opening port "
+                    f"{self.port}{self._diagnosis()}"
+                )
             try:
                 targets = json.load(
                     urllib.request.urlopen(f"http://127.0.0.1:{self.port}/json")
@@ -72,7 +128,46 @@ class Browser:
             except Exception:
                 pass
             time.sleep(0.25)
-        raise RuntimeError(f"chrome did not come up on port {self.port}")
+        raise RuntimeError(
+            f"chrome did not open port {self.port} within {timeout:.0f}s, and is "
+            f"still running{self._diagnosis()}"
+        )
+
+    def _diagnosis(self):
+        """The binary, and whatever Chrome managed to say before giving up."""
+        detail = f"\n    binary: {getattr(self, 'binary', '?')}"
+        try:
+            self.log.flush()
+            with open(self.log.name) as handle:
+                said = handle.read().strip()
+        except Exception:
+            said = ""
+        if said:
+            tail = "\n      ".join(said.splitlines()[-12:])
+            detail += f"\n    chrome said:\n      {tail}"
+        else:
+            detail += "\n    chrome said nothing"
+        return detail
+
+    def _stop(self):
+        """Tear down whatever the last attempt managed to create."""
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+            self.proc = None
+        if self.log is not None:
+            try:
+                self.log.close()
+                os.unlink(self.log.name)
+            except Exception:
+                pass
+            self.log = None
+        if self.profile is not None:
+            shutil.rmtree(self.profile, ignore_errors=True)
+            self.profile = None
 
     def send(self, method, **params):
         self.id += 1
@@ -179,15 +274,11 @@ class Browser:
 
     def close(self):
         try:
-            self.ws.close()
+            if self.ws is not None:
+                self.ws.close()
         except Exception:
             pass
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-        shutil.rmtree(self.profile, ignore_errors=True)
+        self._stop()
 
 
 def chrome_binary():

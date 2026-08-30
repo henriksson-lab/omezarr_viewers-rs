@@ -8,6 +8,8 @@
 //! Hand-rolled rather than a crate, because the whole of it is a map, a clock
 //! and a byte budget, and a dependency would be more surface than code.
 
+use omezarr_viewer_common::TileCoords;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -17,14 +19,8 @@ use std::sync::Mutex;
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct TileKey {
     pub layer: String,
-    pub level: usize,
-    pub t: u64,
-    pub c: u64,
-    pub z: u64,
-    pub y: u64,
-    pub x: u64,
-    pub h: u64,
-    pub w: u64,
+    /// Which tile, in the shared crate's spelling.
+    pub coords: TileCoords,
     pub encoding: &'static str,
     /// Projection, when the tile is one: `(kind, z0, z1)`.
     pub projection: Option<(&'static str, u64, u64)>,
@@ -142,14 +138,16 @@ mod tests {
     fn key(x: u64) -> TileKey {
         TileKey {
             layer: "l".into(),
-            level: 0,
-            t: 0,
-            c: 0,
-            z: 0,
-            y: 0,
-            x,
-            h: 1,
-            w: 1,
+            coords: TileCoords {
+                level: 0,
+                t: 0,
+                c: 0,
+                z: 0,
+                y: 0,
+                x,
+                h: 1,
+                w: 1,
+            },
             encoding: "f32",
             projection: None,
         }

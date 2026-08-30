@@ -391,16 +391,17 @@ async fn an_unknown_layer_id_is_not_found() {
 }
 
 #[actix_web::test]
-async fn asking_an_image_layer_for_objects_is_not_a_server_error() {
+async fn asking_an_image_layer_for_objects_is_a_bad_request_not_a_missing_one() {
     let api = Api::with_objects().await;
     let image = api.layer_of_kind("image").await;
-    // The layer exists but carries no rows. That is the client asking for the
-    // wrong thing, not the server breaking.
+    // The layer exists but carries no rows. That is the client asking the wrong
+    // layer, which is a different thing from naming one that is not there — and
+    // both used to be the same 404, so nothing downstream could tell them apart.
     let res = api.get(&whole_world(&image)).await;
-    assert_eq!(res.status, 404, "{} {}", res.status, res.text());
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
     assert!(
-        res.text().contains("no such object layer"),
-        "the body should say what was wrong: {}",
+        res.text().contains(&image) && res.text().contains("holds no objects"),
+        "the body should name the layer and what it lacks: {}",
         res.text()
     );
 }
@@ -528,15 +529,23 @@ async fn a_click_needs_no_radius_of_its_own() {
 }
 
 #[actix_web::test]
-async fn a_click_on_a_layer_that_holds_no_rows_is_not_found() {
+async fn a_click_tells_an_unknown_layer_from_one_that_holds_no_rows() {
     let api = Api::with_objects().await;
     let image = api.layer_of_kind("image").await;
-    for layer in [image.as_str(), "L99"] {
-        let res = api
-            .get(&format!("/api/objects/at?layer={layer}&z=0&y=1&x=1"))
-            .await;
-        assert_eq!(res.status, 404, "{layer}: {} {}", res.status, res.text());
-    }
+
+    let unknown = api.get("/api/objects/at?layer=L99&z=0&y=1&x=1").await;
+    assert_eq!(unknown.status, 404, "{} {}", unknown.status, unknown.text());
+    assert!(unknown.text().contains("L99"), "{}", unknown.text());
+
+    let no_rows = api
+        .get(&format!("/api/objects/at?layer={image}&z=0&y=1&x=1"))
+        .await;
+    assert_eq!(no_rows.status, 400, "{} {}", no_rows.status, no_rows.text());
+    assert!(
+        no_rows.text().contains("holds no objects"),
+        "{}",
+        no_rows.text()
+    );
 }
 
 #[actix_web::test]

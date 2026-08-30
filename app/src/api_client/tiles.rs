@@ -4,21 +4,16 @@
 //! round trip, and a filtered id that does not exist is worse than no filter at
 //! all — so label tiles come back as raw bytes and are widened here.
 
-use gloo_net::http::Request;
+use omezarr_viewer_common::TileCoords;
 
-use super::get_host_url;
+use super::{get_host_url, get_json, get_ok, read_bytes};
 
 /// Where a tile is, on the wire.
 #[derive(Clone, Copy, Debug)]
 pub struct TileAddress {
-    pub level: usize,
-    pub t: u64,
-    pub c: u64,
-    pub z: u64,
-    pub y: u64,
-    pub x: u64,
-    pub h: u64,
-    pub w: u64,
+    /// Which tile, in the shared crate's spelling — the same eight numbers the
+    /// server's cache key and reader request carry.
+    pub coords: TileCoords,
     /// `Some((kind, depth))` to project through z instead of taking one slice.
     pub projection: Option<(&'static str, u64)>,
 }
@@ -29,14 +24,14 @@ fn tile_url(layer: &str, at: &TileAddress, encoding: &str) -> String {
         get_host_url(),
         layer,
         encoding,
-        at.level,
-        at.t,
-        at.c,
-        at.z,
-        at.y,
-        at.x,
-        at.h,
-        at.w
+        at.coords.level,
+        at.coords.t,
+        at.coords.c,
+        at.coords.z,
+        at.coords.y,
+        at.coords.x,
+        at.coords.h,
+        at.coords.w
     );
     if let Some((kind, depth)) = at.projection {
         url.push_str(&format!("&zproj={kind}&depth={depth}"));
@@ -46,17 +41,8 @@ fn tile_url(layer: &str, at: &TileAddress, encoding: &str) -> String {
 
 /// Fetch a rectangular tile region as float32 pixel data.
 pub async fn fetch_tile(layer: &str, at: &TileAddress) -> Result<Vec<f32>, String> {
-    let resp = Request::get(&tile_url(layer, at, "f32"))
-        .send()
-        .await
-        .map_err(|e| format!("fetch tile: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch tile: status {}", resp.status()));
-    }
-    let bytes = resp
-        .binary()
-        .await
-        .map_err(|e| format!("read tile bytes: {}", e))?;
+    let resp = get_ok(&tile_url(layer, at, "f32"), "fetch tile").await?;
+    let bytes = read_bytes(resp, "read tile bytes").await?;
     Ok(bytes
         .as_chunks::<4>()
         .0
@@ -72,21 +58,12 @@ pub async fn fetch_tile(layer: &str, at: &TileAddress) -> Result<Vec<f32>, Strin
 /// WebGL2 integer texture holds. A `uint64` array whose ids exceed `u32` is
 /// reported rather than silently wrapped.
 pub async fn fetch_label_tile(layer: &str, at: &TileAddress) -> Result<Vec<u32>, String> {
-    let resp = Request::get(&tile_url(layer, at, "raw"))
-        .send()
-        .await
-        .map_err(|e| format!("fetch labels: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch labels: status {}", resp.status()));
-    }
+    let resp = get_ok(&tile_url(layer, at, "raw"), "fetch labels").await?;
     let dtype = resp
         .headers()
         .get("X-Dtype")
         .unwrap_or_else(|| "uint32".to_string());
-    let bytes = resp
-        .binary()
-        .await
-        .map_err(|e| format!("read label bytes: {}", e))?;
+    let bytes = read_bytes(resp, "read label bytes").await?;
     ids_from_bytes(&bytes, &dtype)
 }
 
@@ -178,16 +155,7 @@ pub async fn fetch_value(
         y,
         x
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch value: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch value: status {}", resp.status()));
-    }
-    resp.json::<VoxelValue>()
-        .await
-        .map_err(|e| format!("parse value: {}", e))
+    get_json(&url, "fetch value", "parse value").await
 }
 
 /// A plane read from one axis: pixels and the shape they came back in.
@@ -220,13 +188,7 @@ pub async fn fetch_slice(
         t,
         c
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch slice: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch slice: status {}", resp.status()));
-    }
+    let resp = get_ok(&url, "fetch slice").await?;
     let width = resp
         .headers()
         .get("X-Width")
@@ -237,10 +199,7 @@ pub async fn fetch_slice(
         .get("X-Height")
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
-    let bytes = resp
-        .binary()
-        .await
-        .map_err(|e| format!("read slice: {}", e))?;
+    let bytes = read_bytes(resp, "read slice").await?;
     let pixels = bytes
         .as_chunks::<4>()
         .0

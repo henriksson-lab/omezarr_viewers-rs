@@ -258,7 +258,9 @@ async fn a_tile_of_an_unknown_layer_is_a_404() {
         .get("/api/tile?layer=L99&level=0&z=0&y=0&x=0&h=8&w=8")
         .await;
     assert_eq!(res.status, 404, "{}", res.text());
-    assert!(res.text().contains("No such layer"), "{}", res.text());
+    // The body names the id, so a client with several requests in flight can
+    // tell which layer it was told about.
+    assert!(res.text().contains("L99"), "{}", res.text());
 }
 
 #[actix_web::test]
@@ -348,24 +350,25 @@ async fn a_time_index_is_ignored_by_a_volume_that_has_no_time_axis() {
 }
 
 #[actix_web::test]
-async fn a_level_outside_the_dataset_is_a_500_from_tile_and_value_but_a_400_from_slice() {
+async fn a_level_outside_the_dataset_is_a_400_from_every_pixel_route() {
     let api = Api::image().await;
-    // Pinned, not endorsed. All three are the same caller error — a level the
-    // dataset does not have — and only /api/slice, which checks the level
-    // before reading, calls it one.
+    // All three are the same caller error — a level the dataset does not have —
+    // and all three now say so. /api/tile and /api/value used to discover it in
+    // the reader and answer 500, which is the status that makes a frontend
+    // retry a request that can never succeed.
     for uri in [
         "/api/tile?level=42&z=0&y=0&x=0&h=8&w=8",
         "/api/value?level=42&z=0&y=0&x=0",
+        "/api/slice?level=42&index=0",
     ] {
         let res = api.get(uri).await;
-        assert_eq!(res.status, 500, "{uri}: {} {}", res.status, res.text());
+        assert_eq!(res.status, 400, "{uri}: {} {}", res.status, res.text());
         assert!(
             res.text().contains("outside this dataset"),
-            "{}",
+            "{uri}: {}",
             res.text()
         );
     }
-    assert_eq!(api.get("/api/slice?level=42&index=0").await.status, 400);
 }
 
 // -- /api/slice --------------------------------------------------------------
@@ -432,8 +435,7 @@ async fn a_slice_index_past_the_end_of_its_axis_is_clamped() {
 async fn a_slice_level_outside_the_dataset_is_a_400() {
     let api = Api::image().await;
     let res = api.get("/api/slice?level=42&index=0").await;
-    // The level is checked before the read here, so this route names the
-    // caller's mistake — unlike /api/tile, which discovers it in the reader.
+    // The level is checked before the read, on this route as on the other two.
     assert_eq!(res.status, 400, "{}", res.text());
 }
 
@@ -507,15 +509,26 @@ async fn a_value_request_names_no_region_when_no_ontology_is_loaded() {
 }
 
 #[actix_web::test]
-async fn a_value_of_an_unknown_or_pixel_less_layer_is_a_404() {
+async fn a_value_tells_an_unknown_layer_from_a_pixel_less_one() {
     let api = Api::with_objects().await;
     let objects = api.layer_of_kind("objects").await;
-    for layer in ["L99", objects.as_str()] {
-        let res = api
-            .get(&format!("/api/value?layer={layer}&level=0&z=0&y=0&x=0"))
-            .await;
-        assert_eq!(res.status, 404, "{layer}: {} {}", res.status, res.text());
-    }
+
+    // The two used to be one 404 here and a 404/400 pair on /api/tile, for the
+    // same pair of requests. A client cannot act on that: "the layer is gone"
+    // and "that layer has no pixels, ask another" call for different things.
+    let unknown = api.get("/api/value?layer=L99&level=0&z=0&y=0&x=0").await;
+    assert_eq!(unknown.status, 404, "{}", unknown.text());
+    assert!(unknown.text().contains("L99"), "{}", unknown.text());
+
+    let pixel_less = api
+        .get(&format!("/api/value?layer={objects}&level=0&z=0&y=0&x=0"))
+        .await;
+    assert_eq!(pixel_less.status, 400, "{}", pixel_less.text());
+    assert!(
+        pixel_less.text().contains("holds no image data"),
+        "{}",
+        pixel_less.text()
+    );
 }
 
 #[actix_web::test]
@@ -618,27 +631,33 @@ async fn a_coarser_label_level_counts_the_same_objects() {
 }
 
 #[actix_web::test]
-async fn regions_without_both_a_label_and_an_object_layer_is_a_404() {
+async fn regions_names_the_layer_it_could_not_use_and_says_which_way() {
     let api = Api::with_objects().await;
     let objects = api.layer_of_kind("objects").await;
     let image = api.layer_of_kind("image").await;
+
+    // An id nothing answers to: 404, naming it.
     for uri in [
-        // no label layer by that name
         format!("/api/regions?labels=L99&objects={objects}"),
-        // no object layer by that name
         format!("/api/regions?labels={image}&objects=L99"),
-        // an object layer named as the labels holds no ids to count into
-        format!("/api/regions?labels={objects}&objects={objects}"),
     ] {
         let res = api.get(&uri).await;
         assert_eq!(res.status, 404, "{uri}: {} {}", res.status, res.text());
-        assert!(
-            res.text()
-                .contains("need a label layer and an object layer"),
-            "{uri}: {}",
-            res.text()
-        );
+        assert!(res.text().contains("L99"), "{uri}: {}", res.text());
     }
+
+    // A layer that is open and is the wrong kind: 400, naming what it lacks.
+    // One 404 for both used to leave the caller unable to tell a typo from a
+    // layer that simply holds no ids to count into.
+    let wrong_kind = api
+        .get(&format!("/api/regions?labels={objects}&objects={objects}"))
+        .await;
+    assert_eq!(wrong_kind.status, 400, "{}", wrong_kind.text());
+    assert!(
+        wrong_kind.text().contains("holds no image data"),
+        "{}",
+        wrong_kind.text()
+    );
 }
 
 #[actix_web::test]

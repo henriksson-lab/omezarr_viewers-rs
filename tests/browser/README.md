@@ -58,3 +58,28 @@ failure line carries what was measured, so a wrong *expectation* and a wrong
 
 Each suite gets a fresh server and store. Sharing one is how two suites came to
 pass individually and fail together: the session holds annotations in memory.
+
+## When Chrome will not start
+
+`run.py` launches one browser before any suite and gives up immediately if that
+fails, because a Chrome that will not start is an environment problem rather
+than a test failure — discovering it once per suite buried the one useful line
+under six identical stack traces.
+
+The error carries Chrome's own stderr, its exit status and the binary that was
+run:
+
+    the browser suites need a working Chrome:
+    chrome would not start.
+      attempt 1: chrome exited with status 133 before opening port 59221
+        binary: /usr/bin/google-chrome
+        chrome said:
+          Failed to move to new namespace
+
+That detail exists because the first CI run of this gate failed with nothing but
+`chrome did not come up on port 9549`: the driver was sending Chrome's output to
+`DEVNULL`, so the only thing that knew what was wrong was thrown away. It is
+kept now. Two flags earn their place for the same reason —
+`--disable-dev-shm-usage`, because a CI runner's `/dev/shm` is small and Chrome
+dies during startup when its shared memory will not fit, and
+`--disable-setuid-sandbox` beside the existing `--no-sandbox`.

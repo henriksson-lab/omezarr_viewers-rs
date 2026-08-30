@@ -4,9 +4,9 @@
 //! decimated answer can say "showing N of M" rather than presenting a subset as
 //! though it were everything.
 
-use gloo_net::http::Request;
+use omezarr_viewer_common::ObjectRegion;
 
-use super::get_host_url;
+use super::{get_host_url, get_json, get_ok, read_bytes};
 
 /// One object query's answer: rows, their columns, and what was left out.
 #[derive(Debug, Default)]
@@ -17,19 +17,6 @@ pub struct ObjectBatch {
     pub columns: Vec<Vec<f32>>,
     /// How many rows matched on the server, before any cap.
     pub total: usize,
-}
-
-/// The rectangle and slab an object query covers, in world pixels.
-#[derive(Clone, Copy, Debug)]
-pub struct ObjectRegion {
-    pub y0: f32,
-    pub y1: f32,
-    pub x0: f32,
-    pub x1: f32,
-    pub z0: f32,
-    pub z1: f32,
-    /// The most rows to accept. The server decimates deterministically above it.
-    pub max: usize,
 }
 
 /// Fetch the objects in a region, with the named columns.
@@ -51,22 +38,13 @@ pub async fn fetch_objects(
         region.max,
         columns.join(",")
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch objects: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch objects: status {}", resp.status()));
-    }
+    let resp = get_ok(&url, "fetch objects").await?;
     let total = resp
         .headers()
         .get("X-Total")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
-    let bytes = resp
-        .binary()
-        .await
-        .map_err(|e| format!("read objects: {}", e))?;
+    let bytes = read_bytes(resp, "read objects").await?;
     let mut batch = decode_objects(&bytes)?;
     batch.total = total;
     Ok(batch)
@@ -152,16 +130,6 @@ pub async fn fetch_object_at(
         x,
         radius
     );
-    let resp = Request::get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("fetch object: {}", e))?;
-    if !resp.ok() {
-        return Err(format!("fetch object: status {}", resp.status()));
-    }
-    let value = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| format!("parse object: {}", e))?;
+    let value: serde_json::Value = get_json(&url, "fetch object", "parse object").await?;
     Ok((!value.is_null()).then_some(value))
 }

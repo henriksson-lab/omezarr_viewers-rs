@@ -115,6 +115,15 @@ def main():
         sys.exit("dist/index.html is missing — run `make build` (the server serves it)")
 
     os.makedirs(args.shots, exist_ok=True)
+
+    # One browser before any suite. A Chrome that will not start is an
+    # environment problem, not a test failure, and discovering it six times over
+    # buries the one line that says why in six identical stack traces.
+    try:
+        Browser().close()
+    except RuntimeError as error:
+        sys.exit(f"the browser suites need a working Chrome:\n{error}")
+
     wanted = args.suites or SUITES
     results = []
     for name in wanted:

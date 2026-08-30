@@ -301,21 +301,8 @@ mod tests {
                 }
             }
         }
-        let dict = format!(
-            "{{'descr': '<u2', 'fortran_order': False, 'shape': ({}, {}, {}), }}",
-            shape.0, shape.1, shape.2
-        );
-        let mut header = dict.into_bytes();
-        while !(10 + header.len() + 1).is_multiple_of(64) {
-            header.push(b' ');
-        }
-        header.push(b'\n');
-        let mut out = Vec::new();
-        out.extend_from_slice(b"\x93NUMPY\x01\x00");
-        out.extend_from_slice(&(header.len() as u16).to_le_bytes());
-        out.extend_from_slice(&header);
-        out.extend_from_slice(&data);
-        std::fs::write(path, out).expect("write npy");
+        let shape = format!("({}, {}, {})", shape.0, shape.1, shape.2);
+        std::fs::write(path, crate::npy_header::write("'<u2'", &shape, &data)).expect("write npy");
     }
 
     #[actix_web::test]
@@ -384,18 +371,7 @@ mod tests {
         for value in [1u32, 2, 3, 4] {
             data.extend_from_slice(&value.to_le_bytes());
         }
-        let dict = "{'descr': '<u4', 'fortran_order': False, 'shape': (1, 2, 2), }";
-        let mut header = dict.as_bytes().to_vec();
-        while !(10 + header.len() + 1).is_multiple_of(64) {
-            header.push(b' ');
-        }
-        header.push(b'\n');
-        let mut out = Vec::new();
-        out.extend_from_slice(b"\x93NUMPY\x01\x00");
-        out.extend_from_slice(&(header.len() as u16).to_le_bytes());
-        out.extend_from_slice(&header);
-        out.extend_from_slice(&data);
-        std::fs::write(&npy, out).unwrap();
+        std::fs::write(&npy, crate::npy_header::write("'<u4'", "(1, 2, 2)", &data)).unwrap();
 
         let zarr = dir.path().join("ids.zarr");
         npy_to_zarr(&npy, &zarr, None, 4, 8).expect("convert");

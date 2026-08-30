@@ -233,18 +233,12 @@ impl GridIndex {
 }
 
 /// A region query: a rectangle, a z slab, and a cap on how many rows come back.
-#[derive(Debug, Clone, Copy)]
-pub struct ObjectQuery {
-    pub y0: f32,
-    pub y1: f32,
-    pub x0: f32,
-    pub x1: f32,
-    pub z0: f32,
-    pub z1: f32,
-    /// The most rows to return. Excess is decimated by a fixed stride over the
-    /// row order, so the same query returns the same subset every time.
-    pub max: usize,
-}
+///
+/// The shared crate's type, because the client declared the same seven fields
+/// under the name `ObjectRegion`: this is an API contract, and one side
+/// silently gaining a field is exactly what the shared crate exists to stop.
+/// Re-exported under the server's own word for it.
+pub use omezarr_viewer_common::ObjectRegion as ObjectQuery;
 
 /// The answer to a region query.
 pub struct ObjectSelection {

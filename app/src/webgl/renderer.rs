@@ -502,18 +502,61 @@ impl Renderer {
         gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
     }
 
-    /// Upload one batch of points.
+    /// The uniforms an annotation shape program takes beyond the camera.
     ///
-    /// `data` is interleaved `(z, y, x, value, row)` per point — five floats,
-    /// one buffer, one draw call for the whole layer.
-    pub fn upload_points(&self, data: &[f32]) -> Result<PointBuffer, String> {
+    /// Line and fill infos are separate types carrying the same four values, so
+    /// the values are passed rather than the struct.
+    fn set_shape_uniforms(
+        &self,
+        program: &web_sys::WebGlProgram,
+        z: f32,
+        slab: f32,
+        opacity: f32,
+        color: [f32; 3],
+    ) {
+        let gl = &self.ctx.gl;
+        for (name, value) in [("u_z", z), ("u_slab", slab), ("u_opacity", opacity)] {
+            if let Some(loc) = gl.get_uniform_location(program, name) {
+                gl.uniform1f(Some(&loc), value);
+            }
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_color") {
+            gl.uniform3f(Some(&loc), color[0], color[1], color[2]);
+        }
+    }
+
+    /// Create a VAO and an `ARRAY_BUFFER` holding `data`, then declare the
+    /// vertex layout on it.
+    ///
+    /// The batch uploads below (points, lines, fills) differ only in that
+    /// layout, so the layout is all they pass: one `(location, size, offset)`
+    /// row per attribute, every attribute a `FLOAT` and all of them sharing
+    /// `stride`. A table of three short rows reads better at each call site
+    /// than three copies of the create/bind/upload/unbind scaffolding, so the
+    /// scaffolding — including the one `unsafe` region — lives here alone.
+    fn upload_vertex_buffer(
+        &self,
+        data: &[f32],
+        what: &str,
+        stride: i32,
+        attribs: &[(u32, i32, i32)],
+    ) -> Result<(web_sys::WebGlVertexArrayObject, web_sys::WebGlBuffer), String> {
         let gl = &self.ctx.gl;
         let vao = gl
             .create_vertex_array()
-            .ok_or("Failed to create point VAO")?;
-        let buffer = gl.create_buffer().ok_or("Failed to create point buffer")?;
+            .ok_or_else(|| format!("Failed to create {what} VAO"))?;
+        let buffer = gl
+            .create_buffer()
+            .ok_or_else(|| format!("Failed to create {what} buffer"))?;
         gl.bind_vertex_array(Some(&vao));
         gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
+        // SAFETY: `Float32Array::view` does not copy — it is a window onto the
+        // wasm linear memory that borrows `data`. Any allocation on the wasm
+        // heap may grow and so *move* that memory, leaving the view pointing at
+        // nothing, and the view must not outlive the borrow of `data` either.
+        // So the unsafe region stays exactly this wide: make the view, hand it
+        // to `buffer_data_*` (which copies it into the GL buffer), drop it.
+        // Nothing between those three lines allocates.
         unsafe {
             let array = Float32Array::view(data);
             gl.buffer_data_with_array_buffer_view(
@@ -522,14 +565,29 @@ impl Renderer {
                 WebGl2RenderingContext::STATIC_DRAW,
             );
         }
-        let stride = 5 * 4;
-        gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_with_i32(0, 3, WebGl2RenderingContext::FLOAT, false, stride, 0);
-        gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_with_i32(1, 1, WebGl2RenderingContext::FLOAT, false, stride, 12);
-        gl.enable_vertex_attrib_array(2);
-        gl.vertex_attrib_pointer_with_i32(2, 1, WebGl2RenderingContext::FLOAT, false, stride, 16);
+        for &(location, size, offset) in attribs {
+            gl.enable_vertex_attrib_array(location);
+            gl.vertex_attrib_pointer_with_i32(
+                location,
+                size,
+                WebGl2RenderingContext::FLOAT,
+                false,
+                stride,
+                offset,
+            );
+        }
         gl.bind_vertex_array(None);
+        Ok((vao, buffer))
+    }
+
+    /// Upload one batch of points.
+    ///
+    /// `data` is interleaved `(z, y, x, value, row)` per point — five floats,
+    /// one buffer, one draw call for the whole layer.
+    pub fn upload_points(&self, data: &[f32]) -> Result<PointBuffer, String> {
+        // (z, y, x) | value | row
+        let (vao, buffer) =
+            self.upload_vertex_buffer(data, "point", 5 * 4, &[(0, 3, 0), (1, 1, 12), (2, 1, 16)])?;
 
         Ok(PointBuffer {
             vao,
@@ -594,29 +652,9 @@ impl Renderer {
     /// per segment and four segments per box — the whole layer in one buffer and
     /// one draw call.
     pub fn upload_lines(&self, data: &[f32]) -> Result<LineBuffer, String> {
-        let gl = &self.ctx.gl;
-        let vao = gl
-            .create_vertex_array()
-            .ok_or("Failed to create line VAO")?;
-        let buffer = gl.create_buffer().ok_or("Failed to create line buffer")?;
-        gl.bind_vertex_array(Some(&vao));
-        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
-        unsafe {
-            let array = Float32Array::view(data);
-            gl.buffer_data_with_array_buffer_view(
-                WebGl2RenderingContext::ARRAY_BUFFER,
-                &array,
-                WebGl2RenderingContext::STATIC_DRAW,
-            );
-        }
-        let stride = 5 * 4;
-        gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, stride, 0);
-        gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_with_i32(1, 2, WebGl2RenderingContext::FLOAT, false, stride, 8);
-        gl.enable_vertex_attrib_array(2);
-        gl.vertex_attrib_pointer_with_i32(2, 1, WebGl2RenderingContext::FLOAT, false, stride, 16);
-        gl.bind_vertex_array(None);
+        // (x, y) | (z0, z1) | selected
+        let (vao, buffer) =
+            self.upload_vertex_buffer(data, "line", 5 * 4, &[(0, 2, 0), (1, 2, 8), (2, 1, 16)])?;
 
         Ok(LineBuffer {
             vao,
@@ -643,18 +681,7 @@ impl Renderer {
         gl.bind_vertex_array(Some(&lines.vao));
         self.set_camera(program, placement);
 
-        for (name, value) in [
-            ("u_z", info.z),
-            ("u_slab", info.slab),
-            ("u_opacity", info.opacity),
-        ] {
-            if let Some(loc) = gl.get_uniform_location(program, name) {
-                gl.uniform1f(Some(&loc), value);
-            }
-        }
-        if let Some(loc) = gl.get_uniform_location(program, "u_color") {
-            gl.uniform3f(Some(&loc), info.color[0], info.color[1], info.color[2]);
-        }
+        self.set_shape_uniforms(program, info.z, info.slab, info.opacity, info.color);
 
         gl.draw_arrays(WebGl2RenderingContext::LINES, 0, lines.count as i32);
     }
@@ -664,27 +691,9 @@ impl Renderer {
     /// `data` is interleaved `(x, y, z0, z1)` per vertex, three vertices per
     /// triangle — the whole layer's fills in one buffer and one draw call.
     pub fn upload_fills(&self, data: &[f32]) -> Result<FillBuffer, String> {
-        let gl = &self.ctx.gl;
-        let vao = gl
-            .create_vertex_array()
-            .ok_or("Failed to create fill VAO")?;
-        let buffer = gl.create_buffer().ok_or("Failed to create fill buffer")?;
-        gl.bind_vertex_array(Some(&vao));
-        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
-        unsafe {
-            let array = Float32Array::view(data);
-            gl.buffer_data_with_array_buffer_view(
-                WebGl2RenderingContext::ARRAY_BUFFER,
-                &array,
-                WebGl2RenderingContext::STATIC_DRAW,
-            );
-        }
-        let stride = 4 * 4;
-        gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, stride, 0);
-        gl.enable_vertex_attrib_array(1);
-        gl.vertex_attrib_pointer_with_i32(1, 2, WebGl2RenderingContext::FLOAT, false, stride, 8);
-        gl.bind_vertex_array(None);
+        // (x, y) | (z0, z1)
+        let (vao, buffer) =
+            self.upload_vertex_buffer(data, "fill", 4 * 4, &[(0, 2, 0), (1, 2, 8)])?;
 
         Ok(FillBuffer {
             vao,
@@ -711,18 +720,7 @@ impl Renderer {
         gl.bind_vertex_array(Some(&fills.vao));
         self.set_camera(program, placement);
 
-        for (name, value) in [
-            ("u_z", info.z),
-            ("u_slab", info.slab),
-            ("u_opacity", info.opacity),
-        ] {
-            if let Some(loc) = gl.get_uniform_location(program, name) {
-                gl.uniform1f(Some(&loc), value);
-            }
-        }
-        if let Some(loc) = gl.get_uniform_location(program, "u_color") {
-            gl.uniform3f(Some(&loc), info.color[0], info.color[1], info.color[2]);
-        }
+        self.set_shape_uniforms(program, info.z, info.slab, info.opacity, info.color);
 
         gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, fills.count as i32);
     }

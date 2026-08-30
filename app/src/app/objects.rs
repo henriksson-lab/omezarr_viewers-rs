@@ -7,7 +7,9 @@ use crate::api_client::ObjectBatch;
 use wasm_bindgen_futures::spawn_local;
 
 use super::{App, AppMsg};
-use crate::api_client::{self, ObjectRegion};
+use omezarr_viewer_common::ObjectRegion;
+
+use crate::api_client;
 use crate::layers::{LayerState, LayerUi, ObjectData};
 
 pub enum ObjectMsg {

@@ -353,3 +353,62 @@ impl Default for WorldScale {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The API contract's shared shapes
+// ---------------------------------------------------------------------------
+
+/// Which tile: a level, a moment in `(t, c, z)`, and a rectangle in that
+/// level's own pixels.
+///
+/// These eight numbers were declared four times — the client's `TileAddress`,
+/// the server's `TileQuery`, the cache's `TileKey` and the reader's
+/// `TileRequest` — so adding an axis meant finding all four. Worse, the
+/// projection beside them was spelled three different ways: `(kind, depth)` on
+/// the way out, `(kind, z0, z1)` in the cache key, and a bare `depth` in the
+/// query. Converting between those is where one of four overflow panics lived,
+/// which is the argument for declaring the shape once.
+///
+/// `TileQuery` is the one that does not embed this: it is deserialised from a
+/// flat query string by `serde_urlencoded`, which does not support
+/// `#[serde(flatten)]`. It converts instead.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TileCoords {
+    pub level: usize,
+    pub t: u64,
+    pub c: u64,
+    pub z: u64,
+    pub y: u64,
+    pub x: u64,
+    pub h: u64,
+    pub w: u64,
+}
+
+impl TileCoords {
+    /// The z planes a projection of `depth` planes covers, starting here.
+    ///
+    /// Saturating, and in one place, because `z` and `depth` are both
+    /// query-string values: `z + depth` wrapping is a panic in a debug build,
+    /// and it was written out by hand at every site that needed it.
+    pub fn z_range(&self, depth: u64) -> std::ops::Range<u64> {
+        self.z..self.z.saturating_add(depth.max(1))
+    }
+}
+
+/// The rectangle and z slab an object query covers, in world pixels.
+///
+/// One type rather than the client's `ObjectRegion` and the server's
+/// `ObjectQuery`, which were field-for-field identical: this is an API
+/// contract, and the shared crate is where those live.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct ObjectRegion {
+    pub y0: f32,
+    pub y1: f32,
+    pub x0: f32,
+    pub x1: f32,
+    pub z0: f32,
+    pub z1: f32,
+    /// The most rows to return. Excess is decimated by a fixed stride over the
+    /// row order, so the same query returns the same subset every time.
+    pub max: usize,
+}

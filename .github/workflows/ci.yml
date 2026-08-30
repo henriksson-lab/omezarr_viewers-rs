@@ -113,6 +113,26 @@ jobs:
       # not a failure — a gate that never reports is worse than one that fails.
       # The suites take about two minutes here; the rest is headroom for a
       # runner slower than this machine.
+      # Named explicitly rather than assumed: the suites need a browser, and
+      # "chrome did not come up" is a poor way to learn the runner image stopped
+      # shipping one. Printing the version also puts it in the log, so a failure
+      # that turns out to be version-specific is diagnosable after the fact.
+      - name: Check for a browser
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if command -v google-chrome >/dev/null 2>&1; then
+            google-chrome --version
+          elif command -v chromium >/dev/null 2>&1; then
+            chromium --version
+          elif command -v chromium-browser >/dev/null 2>&1; then
+            chromium-browser --version
+          else
+            echo "no browser on this runner; installing Google Chrome"
+            wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo apt-get install -y ./google-chrome-stable_current_amd64.deb
+            google-chrome --version
+          fi
+
       - name: Test the frontend in a browser
         if: matrix.os == 'ubuntu-latest'
         timeout-minutes: 15

@@ -14,6 +14,8 @@
 
 use anyhow::{bail, Context, Result};
 
+use crate::npy_header;
+
 use super::{ColumnData, NamedColumn, ObjectStore};
 
 /// A field of the array's dtype.
@@ -89,15 +91,16 @@ impl Field {
 }
 
 pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
-    let (header, data) = split_header(bytes)?;
-    let descr = value_of(&header, "descr").context("the header names no dtype")?;
-    let fortran = value_of(&header, "fortran_order")
-        .map(|v| v.contains("True"))
-        .unwrap_or(false);
-    if fortran {
-        bail!("this array is Fortran-ordered; write it C-ordered (np.ascontiguousarray)");
-    }
-    let shape = parse_shape(&header)?;
+    let split = npy_header::split(bytes)?;
+    let descr = npy_header::descr(&split.dict)?;
+    npy_header::require_c_order(&split.dict)?;
+    // Rows and strides are indices into a slice, so the shape is counted the
+    // way it will be used.
+    let shape: Vec<usize> = npy_header::shape(&split.dict)?
+        .iter()
+        .map(|dim| *dim as usize)
+        .collect();
+    let data = split.data;
 
     let fields = parse_fields(&descr)?;
     let (positions, mut columns) = if fields.len() == 1 && fields[0].name.is_empty() {
@@ -235,51 +238,6 @@ fn column_data(integral: bool, values: Vec<f64>) -> ColumnData {
     }
 }
 
-/// Split the `.npy` header dictionary from the data.
-fn split_header(bytes: &[u8]) -> Result<(String, &[u8])> {
-    if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
-        bail!("this file does not start with the NumPy magic");
-    }
-    let major = bytes[6];
-    let (header_len, start) = if major == 1 {
-        (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10usize)
-    } else {
-        (
-            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
-            12usize,
-        )
-    };
-    let end = start + header_len;
-    if bytes.len() < end {
-        bail!("the header runs past the end of the file");
-    }
-    let header = String::from_utf8_lossy(&bytes[start..end]).into_owned();
-    Ok((header, &bytes[end..]))
-}
-
-/// The value of a key in the header dict, as raw text.
-fn value_of(header: &str, key: &str) -> Option<String> {
-    let needle = format!("'{key}':");
-    let at = header.find(&needle)? + needle.len();
-    let rest = header[at..].trim_start();
-    let end = match rest.chars().next()? {
-        '(' => rest.find(')')? + 1,
-        '[' => rest.rfind(']')? + 1,
-        '\'' => rest[1..].find('\'')? + 2,
-        _ => rest.find(',').unwrap_or(rest.len()),
-    };
-    Some(rest[..end].trim().to_string())
-}
-
-fn parse_shape(header: &str) -> Result<Vec<usize>> {
-    let text = value_of(header, "shape").context("the header names no shape")?;
-    let inner = text.trim_start_matches('(').trim_end_matches(')');
-    Ok(inner
-        .split(',')
-        .filter_map(|part| part.trim().parse::<usize>().ok())
-        .collect())
-}
-
 /// The dtype: either one scalar (a plain array) or a list of named fields.
 fn parse_fields(descr: &str) -> Result<Vec<Field>> {
     let descr = descr.trim();
@@ -315,21 +273,7 @@ fn parse_fields(descr: &str) -> Result<Vec<Field>> {
 mod tests {
     use super::*;
 
-    /// Write a `.npy` the way NumPy does, v1 header.
-    fn npy(descr: &str, shape: &str, data: &[u8]) -> Vec<u8> {
-        let dict = format!("{{'descr': {descr}, 'fortran_order': False, 'shape': {shape}, }}");
-        let mut header = dict.into_bytes();
-        while !(10 + header.len() + 1).is_multiple_of(64) {
-            header.push(b' ');
-        }
-        header.push(b'\n');
-        let mut out = Vec::new();
-        out.extend_from_slice(b"\x93NUMPY\x01\x00");
-        out.extend_from_slice(&(header.len() as u16).to_le_bytes());
-        out.extend_from_slice(&header);
-        out.extend_from_slice(data);
-        out
-    }
+    use crate::npy_header::write as npy;
 
     #[test]
     fn reads_an_n_by_3_float_array_as_zyx() {

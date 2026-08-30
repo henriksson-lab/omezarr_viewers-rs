@@ -17,6 +17,8 @@
 use omezarr_viewer_common::TableInfo;
 use yew::prelude::*;
 
+use crate::controls::layer_header::LayerHeader;
+
 #[derive(Properties, PartialEq)]
 pub struct TablePanelProps {
     pub name: String,
@@ -60,19 +62,10 @@ pub fn table_panel(props: &TablePanelProps) -> Html {
         let cb = props.on_more.clone();
         Callback::from(move |_: MouseEvent| cb.emit(()))
     };
-    let on_remove = {
-        let cb = props.on_remove.clone();
-        Callback::from(move |_: MouseEvent| cb.emit(()))
-    };
 
     html! {
         <div class="channel-control">
-            <div class="channel-header">
-                <label>{ format!(" {}", props.name) }</label>
-                <button class="layer-remove" onclick={on_remove} title="Close layer">
-                    {"\u{2715}"}
-                </button>
-            </div>
+            <LayerHeader name={props.name.clone()} on_remove={props.on_remove.clone()} />
 
             <div class="info-text">
                 <p>{ describe(&props.table) }</p>
