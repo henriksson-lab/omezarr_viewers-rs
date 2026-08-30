@@ -99,6 +99,11 @@ class Browser:
             # startup rather than reporting anything useful.
             "--disable-dev-shm-usage",
             "--hide-scrollbars",
+            # Chrome 111+ refuses a WebSocket to the DevTools port unless the
+            # connection's Origin is allowed. Scoped to the only origin that can
+            # reach this port rather than `*`, which would let any page on the
+            # machine drive the browser.
+            f"--remote-allow-origins=http://127.0.0.1:{self.port}",
             "about:blank",
         ]
         self.proc = subprocess.Popen(
@@ -122,8 +127,15 @@ class Browser:
                 )
                 pages = [t for t in targets if t["type"] == "page"]
                 if pages:
+                    # `suppress_origin` because this is not a page: websocket
+                    # -client otherwise sends an `Origin` derived from the URL,
+                    # and Chrome 111+ rejects the handshake as cross-origin.
+                    # That is the actual cause; the launch flag above is the
+                    # documented remedy kept as a second line of defence.
                     return websocket.create_connection(
-                        pages[0]["webSocketDebuggerUrl"], timeout=60
+                        pages[0]["webSocketDebuggerUrl"],
+                        timeout=60,
+                        suppress_origin=True,
                     )
             except Exception:
                 pass
@@ -279,6 +291,25 @@ class Browser:
         except Exception:
             pass
         self._stop()
+
+
+#: The Chrome that first refused a DevTools WebSocket whose `Origin` it had not
+#: been told to allow. Below this the suites cannot exercise that path at all,
+#: so a local pass says less than it looks like it does.
+ORIGIN_CHECK_FROM = 111
+
+
+def chrome_version(binary=None):
+    """`(text, major)` for the browser that would be used, or `(text, None)`."""
+    try:
+        text = subprocess.run(
+            [binary or chrome_binary(), "--version"],
+            capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+    except Exception as error:
+        return (f"unknown ({error})", None)
+    digits = "".join(c if c.isdigit() else " " for c in text).split()
+    return (text, int(digits[0]) if digits else None)
 
 
 def chrome_binary():

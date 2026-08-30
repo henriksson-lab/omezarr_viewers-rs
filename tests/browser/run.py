@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "suites"))
 
-from cdp import Browser  # noqa: E402
+from cdp import ORIGIN_CHECK_FROM, Browser, chrome_version  # noqa: E402
 from harness import Checks, Server, Viewer, binary, demo_store  # noqa: E402
 
 SUITES = ["drawing", "editing", "classes", "hierarchy", "formats", "tables"]
@@ -123,6 +123,19 @@ def main():
         Browser().close()
     except RuntimeError as error:
         sys.exit(f"the browser suites need a working Chrome:\n{error}")
+
+    # Which browser proved it. Printed because the answer has already differed
+    # between a developer's machine and CI in a way that mattered: Chrome only
+    # began refusing a DevTools WebSocket over its `Origin` in 111, so a pass on
+    # an older build cannot say anything about that path.
+    version, major = chrome_version()
+    print(f"browser: {version}")
+    if major is not None and major < ORIGIN_CHECK_FROM:
+        print(
+            f"  note: this is older than Chrome {ORIGIN_CHECK_FROM}. CI runs a "
+            "newer one, so a pass here is not conclusive for anything the "
+            "DevTools protocol changed since."
+        )
 
     wanted = args.suites or SUITES
     results = []

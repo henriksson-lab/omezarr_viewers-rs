@@ -83,3 +83,20 @@ kept now. Two flags earn their place for the same reason —
 `--disable-dev-shm-usage`, because a CI runner's `/dev/shm` is small and Chrome
 dies during startup when its shared memory will not fit, and
 `--disable-setuid-sandbox` beside the existing `--no-sandbox`.
+
+The *second* CI failure is why the driver passes `suppress_origin=True` and
+`--remote-allow-origins`. **Chrome 111 began refusing a DevTools WebSocket whose
+`Origin` it had not been told to allow**, and `websocket-client` sends one
+derived from the URL. A non-browser client has no business sending `Origin` at
+all, so suppressing it is the fix; the launch flag is Chrome's own documented
+remedy, kept as a second line of defence and scoped to the single origin that
+can reach the port rather than `*`.
+
+## A local pass is weaker evidence than it looks
+
+That bug reached CI three times **because this machine could not reproduce it**:
+Chrome 104 here, a current build on the runner, and the check that failed did
+not exist before 111. `run.py` now prints the browser it used, and says so when
+it is older than 111. When a browser failure appears only in CI, compare the
+version in the runner log's "Check for a browser" step against the one printed
+locally before assuming the code is at fault.
