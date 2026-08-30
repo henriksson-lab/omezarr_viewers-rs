@@ -313,7 +313,18 @@ def chrome_version(binary=None):
 
 
 def chrome_binary():
-    """The first Chrome or Chromium on this machine."""
+    """The browser to drive: `$CHROME` if set, else the first one on `PATH`.
+
+    The override exists because the version matters and the one on `PATH` is
+    whatever the machine happens to have. A failure that only appears on CI is
+    usually a version difference, and reproducing it means pointing this at the
+    same build — see the README.
+    """
+    override = os.environ.get("CHROME")
+    if override:
+        if not os.path.exists(override):
+            raise RuntimeError(f"$CHROME is set to {override}, which does not exist")
+        return override
     for name in ("google-chrome", "chromium", "chromium-browser", "chrome"):
         found = shutil.which(name)
         if found:

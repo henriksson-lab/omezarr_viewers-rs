@@ -398,3 +398,40 @@ quoting only the flattering number.
 and `annotations/geojson.rs` (990) are, and neither has been split.
 288 Rust tests, 76 browser assertions, clippy and fmt clean.
 
+---
+
+## 10. A float bug the browser suites caught
+
+`dragging a vertex moves exactly that vertex` began failing on CI only. The
+dragged vertex went exactly where the pointer went; the vertex *after* it moved
+too, by one ULP:
+
+    was 379.59344482421875
+    now 379.5934448242187
+
+**The cause was `serde_json`'s float parser, not the browser.** Without the
+`float_roundtrip` feature its parsing is fast but not correctly rounded. The
+server's dependency graph turns that feature on transitively; the frontend's did
+not. So the server parsed a coordinate exactly, the client parsed the same text
+a ULP away, and the next edit wrote the drift back — a slow, silent corruption
+of annotation coordinates across load/save cycles, in a codebase whose whole
+annotation story is "the coordinates must not move".
+
+- [x] `float_roundtrip` enabled for `serde_json` in `app/Cargo.toml`, with a
+      comment saying why, since a bare feature flag invites removal.
+
+Three things are worth keeping from how it was found:
+
+* **The exact-equality assertion was right.** A tolerance would have hidden a
+  real defect. It is the one place in these suites that compares floats exactly,
+  and it earned its place.
+* **It was only visible on a newer Chrome** by accident of subpixel coordinates,
+  which is why it never failed locally. The fix for *that* is `$CHROME` and the
+  version print, not a change to the test.
+* **Every step of the diagnosis was measurement, not inference.** `apply_edit`
+  was cleared by a unit test on the exact ring; the server was cleared by a curl
+  round trip; the client was convicted by a logging proxy that captured the POST
+  and the PUT and showed the value changing between them. Three hypotheses were
+  wrong before that (`/dev/shm`, a port collision, a missing browser), and each
+  cost a CI cycle.
+

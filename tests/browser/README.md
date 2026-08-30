@@ -100,3 +100,15 @@ not exist before 111. `run.py` now prints the browser it used, and says so when
 it is older than 111. When a browser failure appears only in CI, compare the
 version in the runner log's "Check for a browser" step against the one printed
 locally before assuming the code is at fault.
+
+**`$CHROME` points the driver at a specific browser**, which is how to reproduce
+one of those failures rather than guess at it:
+
+    curl -sO https://storage.googleapis.com/chrome-for-testing-public/<version>/linux64/chrome-linux64.zip
+    unzip -q chrome-linux64.zip
+    CHROME=$PWD/chrome-linux64/chrome python3 tests/browser/run.py editing
+
+Versions and URLs come from `chrome-for-testing/last-known-good-versions-with-downloads.json`.
+Doing this turned the next failure — a vertex drag that moved two vertices —
+from a mystery into a reproducible ten-minute bisect, and the cause was not the
+browser at all: see `QUALITY.md` task 10.

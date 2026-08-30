@@ -9,7 +9,11 @@ yew = { version = "0.21", features = ["csr"] }
 gloo-net = "0.6"
 gloo-timers = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: without it serde_json's float parser is fast but not
+# correctly rounded, so a coordinate read back from the server could land a
+# ULP away from the one it stored — and the next save wrote the drift back.
+# The server gets this feature transitively; the frontend has to ask.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Ear-clipping triangulation, for filled polygons with holes. Pure Rust, no
 # dependencies of its own, and the only thing between an outline and a fill.
 earcut = "0.4"
