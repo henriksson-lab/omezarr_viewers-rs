@@ -41,7 +41,7 @@ jobs:
             os: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install the Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -103,26 +103,29 @@ jobs:
       - name: Build the desktop app
         run: cargo build -p omezarr-viewer-desktop
 
-      # The frontend has no unit tests, so this is the only thing that checks it
-      # end to end. `continue-on-error` until it has proved itself stable on a
-      # runner — a flaky gate is one people learn to ignore, which is worse than
-      # no gate. Linux only: it needs a GPU-less WebGL2, which means SwiftShader.
+      # A real gate since it proved stable: the frontend's unit tests cover the
+      # pure parts, but every drawing tool, every edit gesture, the label
+      # painting and the table view are verified *only* here, by driving a
+      # browser and asserting on pixels. Linux only: it needs a GPU-less WebGL2,
+      # which means SwiftShader.
+      #
+      # `timeout-minutes` because the failure mode of a browser test is a hang,
+      # not a failure — a gate that never reports is worse than one that fails.
+      # The suites take about two minutes here; the rest is headroom for a
+      # runner slower than this machine.
       - name: Test the frontend in a browser
         if: matrix.os == 'ubuntu-latest'
-        continue-on-error: true
+        timeout-minutes: 15
         run: |
           python3 -m pip install --quiet websocket-client pillow
           cargo build --bin server --bin make_demo
           python3 tests/browser/run.py
 
-  # The check that the *pictures* are right lives outside CI: it drives a real
-  # browser over CDP (see CLAUDE.md). What CI can say cheaply is that the
-  # shaders compile at all, which a headless run does prove.
   formatting:
     name: formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

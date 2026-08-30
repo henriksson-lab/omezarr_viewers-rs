@@ -35,17 +35,75 @@ Same measurements, taken 2026-08-30 after the six tasks:
 
 | | |
 |---|---|
-| Rust tests | 155 (80 server unit, 35 server integration, 16 shared crate, **24 frontend**) |
+| Rust tests | 280 (81 server unit, 159 server integration, 16 shared crate, 24 frontend) |
 | Frontend unit tests | 24, on the host, no `wasm-bindgen-test` |
 | Browser assertions | 76, in `tests/browser/`, run by `make test-browser` and by CI |
 | `cargo test` in CI | `--workspace` |
 | Largest file in `app/src/` | `webgl/renderer.rs`, 757 — `app.rs` is gone, split into eleven modules |
 | Longest function | under 150 lines, everywhere in `app/src/` |
-| Largest server file | `annotations/geojson.rs`, 990 — `roi_table.rs` is five files, none over 400 |
+| Largest server file | `api.rs`, 1275 — untested when this was written, 124 tests now |
 | Panics outside tests | 5: three `unreachable!` and two `as_object()` on a literal |
 
 `geojson.rs` at 990 was never in this plan and is not covered by any of its
 acceptance criteria; it is the obvious next file if this exercise is repeated.
+
+---
+
+## 7. The HTTP surface, tested — added after the six above
+
+`api.rs` was 1275 lines, 26 routes and 47 explicit non-OK status decisions with
+**no Rust test executing a single line of it**. The files in `server/tests/`
+looked like integration tests but called the library directly; the browser
+suites drove real routes, but through the UI, asserting on what the screen shows
+rather than on status codes, headers, or anything the UI never calls.
+
+- [x] `api::configure()` — one route list, shared by `main` and the tests.
+      Ordering is behaviour (`/tables` and `/layers` are literals that also match
+      `/{layer}`), so a harness with its own list would test a server nobody runs.
+- [x] `server/tests/api_harness/` — a real `AppState` over the synthetic
+      fixture, driven over HTTP, with fixtures for image / labels / objects /
+      annotations / remote-writes-enabled.
+- [x] 124 tests across seven files, covering every route and both verdicts on
+      each: `api_session` 24, `api_pixels` 36, `api_objects` 21, `api_tables` 19,
+      `api_annotations` 17, `api_limits` 4, `api_smoke` 3.
+- [x] **The `--allow-remote-writes` gate is pinned**, and the tests were
+      mutation-checked: stubbing the `if` to `false && …` fails exactly two of
+      them, so they hold the gate rather than something adjacent.
+- [x] **Four client-triggerable overflow panics fixed** — `api.rs` ×3 (`z +
+      depth`, `index + 1`, `offset + limit`) and `zarr_reader.rs::z_range`, which
+      the regression test found *after* the first three were fixed.
+
+### Still open, found by these tests
+
+Each is real and none is fixed; each is a judgement call about what the API
+should promise rather than a defect with one obvious answer.
+
+- [ ] **An out-of-range `level` is a 500 from `/api/tile` and `/api/value` but a
+      400 from `/api/slice`.** `slice` validates first; the others discover it
+      inside the reader and blanket-map anyhow to `InternalServerError`. A
+      frontend that retries 5xx retries forever.
+- [ ] **An out-of-range channel returns 200 and a black tile.** `c=9` on a
+      2-channel image comes back as fill-value pixels, indistinguishable from
+      data that is genuinely black, because zarrs pads the out-of-bounds subset.
+      An overhanging y/x tile has a reason to pad; a nonexistent channel has none.
+- [ ] **An unknown `columns=` name is silently dropped** (`api.rs`, the
+      `filter_map` over requested column names). The client indexes the returned
+      planes positionally, so a typo or a server-side rename shifts every later
+      column's meaning instead of erroring — the numbers arrive under the wrong
+      labels.
+- [ ] **`POST /api/project` clears the session before opening the new one**, and
+      answers 200 with an empty layer list when every layer fails. The user is
+      left with nothing and the client gets no signal. `POST /api/open`
+      validates first; `open_project` does not.
+- [ ] **`/api/tables/{layer}/column` returns the same 400 and the same message**
+      for a column that does not exist and one that is text, so a client cannot
+      tell a typo from a type mismatch.
+- [ ] **Naming a pixel-less layer is 400 from `/tile` and `/slice` but 404 from
+      `/value`**, and a 404 from `/objects` does not distinguish "no such layer"
+      from "that layer has no objects".
+
+The theme is one thing: the status-code decisions in `api.rs` were never
+uniform, and until now nothing was in a position to notice.
 
 ---
 
@@ -79,7 +137,10 @@ placeholder broke five assertions in a single edit.
       machine otherwise attach to *each other's* browsers — which happened here,
       and produced a window size nobody had asked for.
 - [x] A CI job, `continue-on-error` at first so a flake does not block a merge,
-      promoted once it has proved stable.
+      promoted once it has proved stable. **Promoted** — it is a required gate
+      now, with a `timeout-minutes` because a browser test's failure mode is a
+      hang rather than a failure. Checked by mutation: breaking one claim in the
+      drawing suite makes the run exit 1.
 
 **Acceptance:** `make test-browser` passes from a clean checkout with no
 scratchpad, and deleting a rendering path fails it.

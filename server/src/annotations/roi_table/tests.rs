@@ -57,7 +57,13 @@ fn a_round_trip_returns_the_same_boxes() {
         boxed(2, 20.25, 10.5, 40.0, 30.0, 0, "vessel"),
     ];
     let target = write(&root, "boxes", &rows, WorldScale::default()).unwrap();
-    assert!(target.ends_with("tables/boxes"));
+    // What the target *parses back into*, not how it is spelled: `make_target`
+    // joins with the platform's own separator, so a `tables/boxes` suffix is a
+    // claim about Unix rather than about the round trip. `split_target` is what
+    // actually consumes this, and it takes both separators.
+    let (parsed_root, parsed_name) = split_target(&target).expect("a table target");
+    assert_eq!(parsed_root, root);
+    assert_eq!(parsed_name, "boxes");
 
     let back = read(&root, "boxes").unwrap();
     assert_eq!(back.backend, "csv");
@@ -640,6 +646,27 @@ fn a_target_splits_into_store_and_name() {
     assert_eq!(name, "boxes");
     assert!(is_remote("s3://bucket/x"));
     assert!(!is_remote("/data/image.zarr/tables/boxes"));
+}
+
+#[test]
+fn a_windows_target_splits_the_same_way() {
+    // Spelled with backslashes on every platform, so the case that only Windows
+    // CI can produce is one Linux can fail on too. `make_target` joins with the
+    // platform separator, and a test that asserted a `tables/name` suffix was a
+    // claim about Unix rather than about the round trip — which is exactly how
+    // this was found.
+    let (root, name) = split_target(r"C:\data\image.zarr\tables\boxes").unwrap();
+    assert_eq!(root, Path::new(r"C:\data\image.zarr"));
+    assert_eq!(name, "boxes");
+
+    // A trailing separator is a target somebody typed, not a different table.
+    assert_eq!(
+        split_target(r"C:\data\image.zarr\tables\boxes\").unwrap().1,
+        "boxes"
+    );
+
+    // And the parent still has to be `tables`.
+    assert!(split_target(r"C:\data\image.zarr\boxes").is_err());
 }
 
 #[test]

@@ -265,11 +265,11 @@ async fn scanning_a_run_finds_the_tables_drawn_over_its_images() {
         .filter(|l| l.role.as_deref() == Some("annotations"))
         .collect();
     assert_eq!(annotations.len(), 1, "layers: {:?}", project.layers);
-    assert!(
-        annotations[0].source.ends_with("tables/drawn"),
-        "{}",
-        annotations[0].source
-    );
+    // By what it parses into rather than by its spelling: the separator is the
+    // platform's, and Windows is where that difference bites.
+    let (_, saved_name) =
+        roi_table::split_uri_target(&annotations[0].source).expect("a table target");
+    assert_eq!(saved_name, "drawn", "{}", annotations[0].source);
 
     // And it is the *only* thing the table contributed: the payload inside the
     // store must never be picked up a second time as a stray CSV.
@@ -503,7 +503,10 @@ async fn a_table_written_by_another_tool_opens_as_a_layer() {
     // Saving it back writes *our* backend, and the rows survive the change.
     let target =
         roi_table::write(&store, "foreign", set.items(), WorldScale::default()).expect("rewrite");
-    assert!(target.ends_with("tables/foreign"));
+    assert_eq!(
+        roi_table::split_target(&target).expect("a table target").1,
+        "foreign"
+    );
     let back = roi_table::read(&store, "foreign").expect("read back");
     assert_eq!(back.backend, "csv", "a rewrite converts the backend");
     assert_eq!(back.rows.len(), 2);
@@ -577,7 +580,10 @@ async fn a_polygon_with_a_hole_survives_a_geojson_round_trip_through_a_session()
         .items()
         .to_vec();
     let target = geojson::save(&store, "drawn", &rows).expect("save");
-    assert!(target.ends_with("annotations/drawn"));
+    assert_eq!(
+        geojson::split_target(&target).expect("a set target").1,
+        "drawn"
+    );
     assert!(store
         .join("annotations/drawn/annotations.geojson")
         .is_file());
@@ -752,7 +758,10 @@ async fn a_qupath_cell_keeps_its_nucleus_name_and_type_through_the_viewer() {
 
     // Saving it back reproduces every one of those.
     let target = geojson::save(&store, "cells", &rows).expect("save");
-    assert!(target.ends_with("annotations/cells"));
+    assert_eq!(
+        geojson::split_target(&target).expect("a set target").1,
+        "cells"
+    );
     let back = geojson::load(&store, "cells").expect("load");
     let after = &back.rows[0];
     assert_eq!(after.object_type, cell.object_type);

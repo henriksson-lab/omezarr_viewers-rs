@@ -32,6 +32,42 @@ pub struct AppState {
     pub allow_remote_writes: bool,
 }
 
+/// Register every route, in the order actix must see them.
+///
+/// One list, shared by `main` and by the HTTP tests, because the *order* is
+/// part of the behaviour: `/tables` and `/layers` are literal segments that
+/// would also match `/{layer}`, and actix takes the first route that matches,
+/// not the most specific. A test that registered its own list in its own order
+/// would be testing a server nobody runs.
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(info)
+        .service(session_info)
+        .service(stats)
+        .service(tile)
+        .service(slice)
+        .service(voxel_value)
+        .service(objects)
+        .service(object_at)
+        .service(regions)
+        .service(datasets)
+        .service(open_dataset)
+        .service(save_project)
+        .service(open_project)
+        .service(add_layer)
+        .service(remove_layer)
+        .service(list_tables)
+        .service(table_rows)
+        .service(table_column)
+        .service(add_annotation_layer)
+        .service(annotations)
+        .service(add_annotation)
+        .service(save_annotations)
+        .service(renest_annotations)
+        .service(detach_annotation)
+        .service(update_annotation)
+        .service(remove_annotation);
+}
+
 /// Handle GET /api/session — every open layer, in draw order.
 #[get("/api/session")]
 pub async fn session_info(data: web::Data<AppState>) -> impl Responder {
@@ -121,7 +157,9 @@ pub async fn tile(data: web::Data<AppState>, query: web::Query<TileQuery>) -> im
         h: q.h,
         w: q.w,
         encoding: encoding.as_str(),
-        projection: projection.map(|p| (p.as_str(), q.z, q.z + depth)),
+        // Saturating: `z` and `depth` are whatever the query string said, and
+        // `u64::MAX + 1` is a panic in a debug build rather than a bad request.
+        projection: projection.map(|p| (p.as_str(), q.z, q.z.saturating_add(depth))),
     };
 
     if let Some(bytes) = data.cache.get(&key) {
@@ -232,7 +270,7 @@ pub async fn slice(data: web::Data<AppState>, query: web::Query<SliceQuery>) -> 
         h: height,
         w: width,
         encoding: encoding.as_str(),
-        projection: Some((axis.as_str(), q.index, q.index + 1)),
+        projection: Some((axis.as_str(), q.index, q.index.saturating_add(1))),
     };
     if let Some(bytes) = data.cache.get(&key) {
         let dtype = wire_dtype(&store, q.level, encoding);
@@ -1149,7 +1187,9 @@ pub async fn table_rows(
         .map(|n| n.to_string())
         .collect();
     let total = table.columns.row_count();
-    let end = (q.offset + q.limit.min(5000)).min(total);
+    // Saturating for the same reason: `offset` comes off the query string, so
+    // `?offset=18446744073709551615` would otherwise panic here.
+    let end = q.offset.saturating_add(q.limit.min(5000)).min(total);
     let rows: Vec<Vec<String>> = (q.offset.min(total)..end)
         .map(|row| {
             names

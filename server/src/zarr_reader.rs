@@ -208,10 +208,14 @@ impl TileRequest {
     }
 
     /// The z planes this request covers.
+    ///
+    /// Saturating, because `z` and `depth` are query-string values: a range
+    /// that starts past the end of the volume is an empty read, which the
+    /// caller already copes with, but `z + depth` wrapping is a panic.
     fn z_range(&self) -> std::ops::Range<u64> {
         match self.projection {
-            Some(_) => self.z..self.z + self.depth.max(1),
-            None => self.z..self.z + 1,
+            Some(_) => self.z..self.z.saturating_add(self.depth.max(1)),
+            None => self.z..self.z.saturating_add(1),
         }
     }
 }
