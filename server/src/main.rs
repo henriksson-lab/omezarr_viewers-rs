@@ -1,5 +1,8 @@
+use std::process::ExitCode;
+
 use actix_files::Files;
 use actix_web::{web, App, HttpServer};
+use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::sync::RwLock;
 
@@ -23,7 +26,10 @@ struct Cli {
     store: Option<String>,
 
     /// Additional layers to open, as `source[:role]` where role is image,
-    /// labels or objects.
+    /// labels, objects or annotations.
+    ///
+    /// `<store>.zarr/tables/<name>:annotations` opens an ROI table this viewer
+    /// (or another tool) wrote.
     /// Repeatable; layers are drawn in the order given, above --store.
     #[arg(long = "layer")]
     layers: Vec<String>,
@@ -43,6 +49,14 @@ struct Cli {
     /// Bind address
     #[arg(long, default_value = "127.0.0.1:8078")]
     bind: String,
+
+    /// Allow annotations to be written to `s3://` and `http(s)://` targets.
+    ///
+    /// Off by default. The credentials this server holds were given to it so it
+    /// could *read* a store; turning them into write access is the operator's
+    /// call to make, not the viewer's.
+    #[arg(long)]
+    allow_remote_writes: bool,
 
     /// Tile cache size in megabytes. 0 disables it.
     #[arg(long, default_value_t = 512)]
@@ -73,12 +87,27 @@ struct Cli {
     prefix: String,
 }
 
-/// Start the actix-web server, open the configured layers, and serve the API +
-/// static files.
+/// Report what went wrong and exit non-zero, rather than panicking.
+///
+/// A mistyped `--store`, an unreadable project file or a malformed ontology are
+/// things a person gets wrong at the prompt; the answer to them is one line
+/// saying which one it was, not a Rust backtrace.
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> ExitCode {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // `{e:#}` is the whole chain — "opening the store" on its own says
+            // nothing about *why* it could not be opened.
+            eprintln!("omezarr-viewer: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
 
+/// Open the configured layers, then serve the API and the static files.
+async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     let access_key = cli
@@ -117,9 +146,11 @@ async fn main() -> std::io::Result<()> {
     let mut session = Session::new();
     if let Some(path) = &cli.project {
         let project = if path.is_dir() {
-            Project::scan(path).expect("scanning the project directory")
+            Project::scan(path)
+                .with_context(|| format!("scanning the project directory {}", path.display()))?
         } else {
-            Project::read(path).expect("reading the project file")
+            Project::read(path)
+                .with_context(|| format!("reading the project file {}", path.display()))?
         };
         log::info!(
             "Opening project `{}` with {} layer(s)",
@@ -129,12 +160,12 @@ async fn main() -> std::io::Result<()> {
         let opened = project
             .open(&registry, &mut session)
             .await
-            .expect("opening the project");
+            .context("opening the project")?;
         log::info!("Opened {opened} of {} layer(s)", project.layers.len());
     }
     if let Some(source) = &cli.store {
         log::info!("Opening store: {source}");
-        let spec = SourceSpec::parse(source).expect("invalid --store");
+        let spec = SourceSpec::parse(source).with_context(|| format!("--store {source}"))?;
         session
             .add(
                 &registry,
@@ -144,16 +175,16 @@ async fn main() -> std::io::Result<()> {
                 ObjectSpace::default(),
             )
             .await
-            .expect("Failed to open zarr store");
+            .with_context(|| format!("opening the store {source}"))?;
     }
     for entry in &cli.layers {
         let (source, role) = split_role(entry);
         log::info!("Opening layer: {source} ({role:?})");
-        let spec = SourceSpec::parse(source).expect("invalid --layer");
+        let spec = SourceSpec::parse(source).with_context(|| format!("--layer {source}"))?;
         session
             .add(&registry, spec, role, None, ObjectSpace::default())
             .await
-            .expect("Failed to open layer");
+            .with_context(|| format!("opening the layer {source}"))?;
     }
 
     for layer in session.layers() {
@@ -177,10 +208,13 @@ async fn main() -> std::io::Result<()> {
         log::info!("No layers open; use the UI to select a dataset");
     }
 
-    let ontology = cli
-        .ontology
-        .as_ref()
-        .map(|path| std::sync::Arc::new(Ontology::read(path).expect("reading the ontology")));
+    let ontology = match &cli.ontology {
+        Some(path) => Some(std::sync::Arc::new(
+            Ontology::read(path)
+                .with_context(|| format!("reading the ontology {}", path.display()))?,
+        )),
+        None => None,
+    };
 
     let data = web::Data::new(AppState {
         session: RwLock::new(session),
@@ -188,6 +222,7 @@ async fn main() -> std::io::Result<()> {
         cache: TileCache::new(cli.cache_mb),
         s3_config,
         ontology,
+        allow_remote_writes: cli.allow_remote_writes,
     });
 
     log::info!("Starting server at http://{}", cli.bind);
@@ -210,19 +245,42 @@ async fn main() -> std::io::Result<()> {
             .service(api::open_project)
             .service(api::add_layer)
             .service(api::remove_layer)
+            // `/tables` and `/layers` are literal segments that would also
+            // match `/{layer}`, so they are registered first: actix takes
+            // the first route that matches, not the most specific.
+            .service(api::list_tables)
+            .service(api::table_rows)
+            .service(api::table_column)
+            .service(api::add_annotation_layer)
+            .service(api::annotations)
+            .service(api::add_annotation)
+            .service(api::save_annotations)
+            .service(api::renest_annotations)
+            .service(api::detach_annotation)
+            .service(api::update_annotation)
+            .service(api::remove_annotation)
             .service(Files::new("/", "./dist/").index_file("index.html"))
     })
-    .bind(&cli.bind)?
+    .bind(&cli.bind)
+    .with_context(|| format!("binding {}", cli.bind))?
     .run()
-    .await
+    .await?;
+    Ok(())
 }
 
 /// Split a `--layer` argument into its source and its role.
 ///
-/// The role is a trailing `:image` / `:labels`, which cannot be confused with a
-/// scheme because a scheme is followed by `//`.
+/// The role is a trailing `:image` / `:labels` / `:annotations`, which cannot be
+/// confused with a scheme because a scheme is followed by `//`.
 fn split_role(entry: &str) -> (&str, LayerRole) {
-    for suffix in [":image", ":labels", ":objects", ":points"] {
+    for suffix in [
+        ":image",
+        ":labels",
+        ":objects",
+        ":points",
+        ":annotations",
+        ":roi",
+    ] {
         if let Some(source) = entry.strip_suffix(suffix) {
             return (source, LayerRole::parse(Some(&suffix[1..])));
         }

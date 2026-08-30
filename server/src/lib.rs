@@ -3,6 +3,7 @@
 //! Split out of the binary so integration tests can drive the same code the
 //! server runs. `src/main.rs` is the CLI around it and nothing else.
 
+pub mod annotations;
 pub mod api;
 pub mod cache;
 pub mod convert;

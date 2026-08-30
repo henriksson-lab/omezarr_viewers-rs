@@ -1,4 +1,4 @@
-use omezarr_viewer_common::ObjectSchema;
+use omezarr_viewer_common::{ObjectColumn, ObjectSchema};
 use yew::prelude::*;
 
 use crate::controls::channel_panel::{color_to_hex, hex_to_color};
@@ -132,53 +132,8 @@ pub fn object_panel(props: &ObjectPanelProps) -> Html {
                 </select>
             </div>
 
-            { for props.schema.columns.iter().enumerate().map(|(i, column)| {
-                let range = column.range.unwrap_or([0.0, 1.0]);
-                let current = props.filters.get(i).copied().flatten();
-                let (lo, hi) = current.unwrap_or((range[0] as f32, range[1] as f32));
-                let step = ((range[1] - range[0]) / 200.0).max(1e-6);
-                let on_lo = {
-                    let cb = props.on_filter.clone();
-                    Callback::from(move |e: InputEvent| {
-                        let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-                        if let Ok(v) = input.value().parse::<f32>() {
-                            cb.emit((i, Some((v, hi))));
-                        }
-                    })
-                };
-                let on_hi = {
-                    let cb = props.on_filter.clone();
-                    Callback::from(move |e: InputEvent| {
-                        let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-                        if let Ok(v) = input.value().parse::<f32>() {
-                            cb.emit((i, Some((lo, v))));
-                        }
-                    })
-                };
-                let on_clear = {
-                    let cb = props.on_filter.clone();
-                    Callback::from(move |_: MouseEvent| cb.emit((i, None)))
-                };
-                html! {
-                    <div class="slider-row filter-row">
-                        <span>{ column.name.clone() }</span>
-                        <div class="dual-range">
-                            <input type="range" class="dual-range-min"
-                                min={range[0].to_string()} max={range[1].to_string()}
-                                step={step.to_string()} value={lo.to_string()} oninput={on_lo} />
-                            <input type="range" class="dual-range-max"
-                                min={range[0].to_string()} max={range[1].to_string()}
-                                step={step.to_string()} value={hi.to_string()} oninput={on_hi} />
-                        </div>
-                        <span class="slider-value">
-                            { if current.is_some() { format!("{lo:.3}\u{2013}{hi:.3}") } else { "all".to_string() } }
-                        </span>
-                        if current.is_some() {
-                            <button class="layer-remove" onclick={on_clear} title="Clear filter">{"\u{2715}"}</button>
-                        }
-                    </div>
-                }
-            })}
+            { for props.schema.columns.iter().enumerate()
+                 .map(|(i, column)| filter_row(props, i, column)) }
 
             <div class="info-text">
                 <p>{ counts(props) }</p>
@@ -200,4 +155,53 @@ fn counts(props: &ObjectPanelProps) -> String {
     }
     text.push_str(&format!(", {} in the set", props.count));
     text
+}
+
+/// One column's range filter: two handles and a way to clear them.
+fn filter_row(props: &ObjectPanelProps, i: usize, column: &ObjectColumn) -> Html {
+    let range = column.range.unwrap_or([0.0, 1.0]);
+    let current = props.filters.get(i).copied().flatten();
+    let (lo, hi) = current.unwrap_or((range[0] as f32, range[1] as f32));
+    let step = ((range[1] - range[0]) / 200.0).max(1e-6);
+    let on_lo = {
+        let cb = props.on_filter.clone();
+        Callback::from(move |e: InputEvent| {
+            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
+            if let Ok(v) = input.value().parse::<f32>() {
+                cb.emit((i, Some((v, hi))));
+            }
+        })
+    };
+    let on_hi = {
+        let cb = props.on_filter.clone();
+        Callback::from(move |e: InputEvent| {
+            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
+            if let Ok(v) = input.value().parse::<f32>() {
+                cb.emit((i, Some((lo, v))));
+            }
+        })
+    };
+    let on_clear = {
+        let cb = props.on_filter.clone();
+        Callback::from(move |_: MouseEvent| cb.emit((i, None)))
+    };
+    html! {
+        <div class="slider-row filter-row">
+            <span>{ column.name.clone() }</span>
+            <div class="dual-range">
+                <input type="range" class="dual-range-min"
+                    min={range[0].to_string()} max={range[1].to_string()}
+                    step={step.to_string()} value={lo.to_string()} oninput={on_lo} />
+                <input type="range" class="dual-range-max"
+                    min={range[0].to_string()} max={range[1].to_string()}
+                    step={step.to_string()} value={hi.to_string()} oninput={on_hi} />
+            </div>
+            <span class="slider-value">
+                { if current.is_some() { format!("{lo:.3}\u{2013}{hi:.3}") } else { "all".to_string() } }
+            </span>
+            if current.is_some() {
+                <button class="layer-remove" onclick={on_clear} title="Clear filter">{"\u{2715}"}</button>
+            }
+        </div>
+    }
 }

@@ -7,15 +7,20 @@ use super::shaders;
 ///
 /// One context, several programs: intensity compositing and label colouring
 /// answer different questions about different textures, and a uniform-flagged
-/// single program would pay for both on every fragment.
+/// single program would pay for both on every fragment. Points and lines are
+/// separate again because their primitives are.
 pub struct GlContext {
     pub gl: WebGl2RenderingContext,
     /// Additive multi-channel intensity.
     pub program: WebGlProgram,
     /// Integer label ids.
     pub label_program: WebGlProgram,
-    /// Object points.
+    /// Object points, and annotation points.
     pub point_program: WebGlProgram,
+    /// Annotation outlines.
+    pub line_program: WebGlProgram,
+    /// Filled annotation regions.
+    pub fill_program: WebGlProgram,
 }
 
 impl GlContext {
@@ -39,6 +44,16 @@ impl GlContext {
             &gl,
             &shaders::point_vertex_shader(),
             shaders::POINT_FRAGMENT_SHADER,
+        )?;
+        let line_program = create_program(
+            &gl,
+            &shaders::line_vertex_shader(),
+            shaders::LINE_FRAGMENT_SHADER,
+        )?;
+        let fill_program = create_program(
+            &gl,
+            &shaders::fill_vertex_shader(),
+            shaders::FILL_FRAGMENT_SHADER,
         )?;
         gl.use_program(Some(&program));
 
@@ -64,6 +79,8 @@ impl GlContext {
             program,
             label_program,
             point_program,
+            line_program,
+            fill_program,
         })
     }
 }

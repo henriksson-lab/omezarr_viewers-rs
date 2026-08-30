@@ -27,6 +27,22 @@ pub enum SourceSpec {
 }
 
 impl SourceSpec {
+    /// A source that does not exist yet.
+    ///
+    /// An annotation layer starts life with nowhere to be read from and nowhere
+    /// to be written to — it is a set of boxes a person is about to draw. It
+    /// gets a real spec the first time it is saved. Spelling that state as an
+    /// empty path, with the two methods here to name it, keeps `Layer.spec`
+    /// non-optional for the other three kinds, which always have a source.
+    pub fn unsaved() -> Self {
+        SourceSpec::File(PathBuf::new())
+    }
+
+    /// Has this source no location at all? See [`SourceSpec::unsaved`].
+    pub fn is_unsaved(&self) -> bool {
+        matches!(self, SourceSpec::File(path) if path.as_os_str().is_empty())
+    }
+
     /// Parse a source URI. A string with no scheme is a path.
     pub fn parse(source: &str) -> Result<Self> {
         if let Some(rest) = source.strip_prefix("file://") {

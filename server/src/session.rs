@@ -13,11 +13,19 @@ use anyhow::{Context, Result};
 use omezarr_viewer_common::{LayerInfo, LayerKind, SessionInfo};
 use std::sync::Arc;
 
+use crate::annotations::AnnotationSet;
 use crate::npy_volume::NpyVolume;
 use crate::objects::{self, ObjectSpace, ObjectStore};
 use crate::source::{SourceRegistry, SourceSpec};
 use crate::volume::Volume;
 use crate::zarr_reader::ZarrStore;
+
+/// How many rows of a table travel with the session.
+///
+/// A feature table has a row per segmented object and there can be a hundred
+/// thousand of them; the rest is paged rather than pushed into every client on
+/// every session read.
+pub const PREVIEW_ROWS: usize = 200;
 
 /// What kind of thing a layer was opened as.
 ///
@@ -29,6 +37,8 @@ pub enum LayerRole {
     Labels,
     /// A table of objects: cells, detections, instances.
     Objects,
+    /// Boxes and points drawn here — the one layer kind the viewer writes.
+    Annotations,
     /// Work out what it is from the source: a `.npy` is a volume, a `.csv` is
     /// objects, a zarr store with `image-label` metadata is labels.
     Auto,
@@ -40,6 +50,7 @@ impl LayerRole {
             Some("image") => LayerRole::Image,
             Some("labels") => LayerRole::Labels,
             Some("objects") | Some("points") => LayerRole::Objects,
+            Some("annotations") | Some("roi") => LayerRole::Annotations,
             _ => LayerRole::Auto,
         }
     }
@@ -51,8 +62,13 @@ pub enum LayerData {
     Labels {
         store: Volume,
         colors: Option<Vec<omezarr_viewer_common::LabelColor>>,
+        properties: Option<Vec<omezarr_viewer_common::LabelProperty>>,
     },
     Objects(Arc<ObjectStore>),
+    /// Mutable, unlike every other kind: this is the one a click edits.
+    Annotations(AnnotationSet),
+    /// Rows with no geometry of their own — a feature or condition table.
+    Table(Box<crate::annotations::roi_table::RoiTable>),
 }
 
 impl LayerData {
@@ -61,7 +77,7 @@ impl LayerData {
         match self {
             LayerData::Image(store) => Some(store),
             LayerData::Labels { store, .. } => Some(store),
-            LayerData::Objects(_) => None,
+            LayerData::Objects(_) | LayerData::Annotations(_) | LayerData::Table(_) => None,
         }
     }
 
@@ -69,6 +85,14 @@ impl LayerData {
     pub fn objects(&self) -> Option<&Arc<ObjectStore>> {
         match self {
             LayerData::Objects(store) => Some(store),
+            _ => None,
+        }
+    }
+
+    /// The annotations behind this layer, for the kind that has any.
+    pub fn annotations(&self) -> Option<&AnnotationSet> {
+        match self {
+            LayerData::Annotations(set) => Some(set),
             _ => None,
         }
     }
@@ -90,6 +114,8 @@ impl Layer {
             LayerData::Image(_) => "image",
             LayerData::Labels { .. } => "labels",
             LayerData::Objects(_) => "objects",
+            LayerData::Annotations(_) => "annotations",
+            LayerData::Table(_) => "table",
         }
     }
 
@@ -106,14 +132,25 @@ impl Layer {
             LayerData::Image(store) => LayerKind::Image {
                 dataset: store.metadata().clone(),
             },
-            LayerData::Labels { store, colors } => LayerKind::Labels {
+            LayerData::Labels {
+                store,
+                colors,
+                properties,
+            } => LayerKind::Labels {
                 dataset: store.metadata().clone(),
                 colors: colors.clone(),
-                properties: None,
+                properties: properties.clone(),
             },
             LayerData::Objects(store) => LayerKind::Objects {
                 schema: store.schema(),
                 count: store.len() as u64,
+            },
+            LayerData::Annotations(set) => LayerKind::Annotations {
+                annotations: set.items().to_vec(),
+                target: set.target().map(str::to_string),
+            },
+            LayerData::Table(table) => LayerKind::Table {
+                table: table.info(PREVIEW_ROWS),
             },
         };
         LayerInfo {
@@ -165,6 +202,137 @@ impl Session {
             .or_else(|| self.layers.first())
     }
 
+    /// The table behind one layer, for the kind that is one.
+    pub fn table(&self, id: &str) -> Option<&crate::annotations::roi_table::RoiTable> {
+        match &self.get(id)?.data {
+            LayerData::Table(table) => Some(table),
+            _ => None,
+        }
+    }
+
+    /// The annotations of one layer, mutably — the only editable thing in a
+    /// session, and the only reason `Session` is ever borrowed for writing
+    /// outside `add`/`remove`.
+    pub fn annotations_mut(&mut self, id: &str) -> Option<&mut AnnotationSet> {
+        match &mut self.layers.iter_mut().find(|layer| layer.id == id)?.data {
+            LayerData::Annotations(set) => Some(set),
+            _ => None,
+        }
+    }
+
+    /// The layer an annotation is drawn *over*: the first image layer, whose
+    /// full-resolution pixels are the world every annotation is held in.
+    pub fn reference_dataset(&self) -> Option<&omezarr_viewer_common::DatasetInfo> {
+        self.default_layer()?.data.store().map(|s| s.metadata())
+    }
+
+    /// Open an annotation source: a GeoJSON set, a bare `.geojson` file, or an
+    /// ngio ROI table.
+    ///
+    /// Which of the three is decided by the *shape of the path*, not by a flag:
+    /// `<store>/annotations/<name>` and `<store>/tables/<name>` are the two
+    /// conventions, and anything ending `.geojson` or `.json` is a file
+    /// somebody exported. Asking the user to say which would be asking them to
+    /// repeat what they already typed.
+    async fn add_annotation_source(
+        &mut self,
+        registry: &SourceRegistry,
+        spec: SourceSpec,
+        name: Option<String>,
+    ) -> Result<String> {
+        use crate::annotations::{geojson, roi_table};
+        let uri = spec.uri();
+
+        if geojson::is_annotation_target(&uri) {
+            let (read, set_name, target) = if geojson::target_is_remote(&uri) {
+                let (store, set_name) = geojson::split_uri_target(&uri)?;
+                let read = geojson::load_async(registry, &store, &set_name)
+                    .await
+                    .with_context(|| format!("reading annotations {uri}"))?;
+                let target = geojson::make_uri_target(&store, &set_name);
+                (read, set_name, target)
+            } else {
+                let (root, set_name) = geojson::split_target(&uri)?;
+                let read = geojson::load(&root, &set_name)
+                    .with_context(|| format!("reading annotations {uri}"))?;
+                let target = geojson::make_target(&root, &set_name);
+                (read, set_name, target)
+            };
+            log::info!("{uri} holds {} annotation(s)", read.rows.len());
+            if !read.declared_space {
+                log::warn!(
+                    "{uri} declares no coordinate space; reading it as full-resolution pixels"
+                );
+            }
+            let set = AnnotationSet::from_rows(read.rows, Some(target));
+            return Ok(self.add_annotations(name.or(Some(set_name)), set));
+        }
+
+        if matches!(spec.extension().as_deref(), Some("geojson") | Some("json")) {
+            let SourceSpec::File(path) = &spec else {
+                anyhow::bail!("a GeoJSON file can only be opened from a local path");
+            };
+            let read =
+                geojson::load_file(path).with_context(|| format!("reading annotations {uri}"))?;
+            log::info!("{uri} holds {} annotation(s)", read.rows.len());
+            let set = AnnotationSet::from_rows(read.rows, Some(path.display().to_string()));
+            return Ok(self.add_annotations(name.or_else(|| Some(spec.short_name())), set));
+        }
+
+        let (read, table, target) = if roi_table::is_remote(&uri) {
+            let (store, table) = roi_table::split_uri_target(&uri)?;
+            let read = roi_table::read_async(registry, &store, &table)
+                .await
+                .with_context(|| format!("reading ROI table {uri}"))?;
+            let target = roi_table::make_uri_target(&store, &table);
+            (read, table, target)
+        } else {
+            let (root, table) = roi_table::split_target(&uri)?;
+            let read = roi_table::read(&root, &table)
+                .with_context(|| format!("reading ROI table {uri}"))?;
+            let target = roi_table::make_target(&root, &table);
+            (read, table, target)
+        };
+        if !read.is_geometry() {
+            // A feature table is per-object measurements keyed to a label image
+            // and a condition table is experiment metadata; neither has
+            // anywhere to be drawn. Opening one as an empty annotation layer
+            // would be the wrong answer told quietly.
+            log::info!(
+                "{uri} is a {} with {} row(s) and no geometry of its own",
+                read.table_type,
+                read.columns.row_count()
+            );
+            return Ok(self.push(spec, LayerData::Table(Box::new(read)), name.or(Some(table))));
+        }
+        log::info!(
+            "{uri} holds {} annotation(s), read from its {} backend{}",
+            read.rows.len(),
+            read.backend,
+            if read.from_obsm {
+                " via obsm[\"spatial\"]"
+            } else {
+                ""
+            }
+        );
+        let set = AnnotationSet::from_rows(read.rows, Some(target));
+        Ok(self.add_annotations(name.or(Some(table)), set))
+    }
+
+    /// Append an empty annotation layer, ready to be drawn into.
+    pub fn add_annotations(&mut self, name: Option<String>, set: AnnotationSet) -> String {
+        let spec = match set.target() {
+            Some(target) => SourceSpec::File(std::path::PathBuf::from(target)),
+            None => SourceSpec::unsaved(),
+        };
+        let name = name.or_else(|| {
+            set.target()
+                .and_then(|t| t.rsplit(std::path::is_separator).next())
+                .map(str::to_string)
+        });
+        self.push(spec, LayerData::Annotations(set), name)
+    }
+
     /// Resolve `layer=`: a named layer, or the default when unnamed.
     pub fn resolve(&self, id: Option<&str>) -> Option<&Layer> {
         match id {
@@ -206,10 +374,16 @@ impl Session {
         // tables under that extension, so the file's own header decides, not
         // its name. Reading the header is a kilobyte, and a range request over
         // S3 rather than the whole object.
+        // An ROI table is a group inside a store, not a store: `zarrs` would
+        // find no multiscales metadata under it and say so in the wrong words.
+        if matches!(role, LayerRole::Annotations) {
+            return self.add_annotation_source(registry, spec, name).await;
+        }
+
         let extension = spec.extension().unwrap_or_default();
         let object_source = match role {
             LayerRole::Objects => true,
-            LayerRole::Image | LayerRole::Labels => false,
+            LayerRole::Image | LayerRole::Labels | LayerRole::Annotations => false,
             LayerRole::Auto => match extension.as_str() {
                 "csv" | "tsv" | "blob" | "bin" | "table" => true,
                 "npy" => {
@@ -255,7 +429,8 @@ impl Session {
             || (matches!(role, LayerRole::Auto) && has_image_label(&store));
         let data = if labelled {
             LayerData::Labels {
-                colors: label_colors(&store),
+                colors: image_label_field(&store, "colors"),
+                properties: image_label_field(&store, "properties"),
                 store,
             }
         } else {
@@ -291,11 +466,16 @@ fn has_image_label(store: &Volume) -> bool {
             .is_some()
 }
 
-/// The `image-label` colour table, when the store carries one.
-fn label_colors(store: &Volume) -> Option<Vec<omezarr_viewer_common::LabelColor>> {
+/// One array out of the store's `image-label` object, parsed.
+///
+/// Both `colors` and `properties` are optional and both are arrays of per-id
+/// objects, so one accessor serves both; a store that declares neither, or
+/// declares one this build cannot parse, gets `None` rather than an error —
+/// a label image with no colour table is the common case, not a broken file.
+fn image_label_field<T: serde::de::DeserializeOwned>(store: &Volume, field: &str) -> Option<T> {
     let attrs = store.attributes()?;
     let label = attrs
         .get("image-label")
         .or_else(|| attrs.get("ome").and_then(|ome| ome.get("image-label")))?;
-    serde_json::from_value(label.get("colors")?.clone()).ok()
+    serde_json::from_value(label.get(field)?.clone()).ok()
 }

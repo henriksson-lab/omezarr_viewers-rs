@@ -64,16 +64,20 @@ impl Field {
         if !self.little_endian {
             buf[..self.width].reverse();
         }
+        // Destructured rather than `buf[..n].try_into().unwrap()`: the widths
+        // are fixed and known here, so the compiler can carry the proof instead
+        // of a runtime check that can only ever be a panic.
+        let [b0, b1, b2, b3, ..] = buf;
         match (self.kind, self.width) {
-            ('f', 4) => f32::from_le_bytes(buf[..4].try_into().unwrap()) as f64,
+            ('f', 4) => f32::from_le_bytes([b0, b1, b2, b3]) as f64,
             ('f', 8) => f64::from_le_bytes(buf),
-            ('i', 1) => i8::from_le_bytes([buf[0]]) as f64,
-            ('i', 2) => i16::from_le_bytes(buf[..2].try_into().unwrap()) as f64,
-            ('i', 4) => i32::from_le_bytes(buf[..4].try_into().unwrap()) as f64,
+            ('i', 1) => i8::from_le_bytes([b0]) as f64,
+            ('i', 2) => i16::from_le_bytes([b0, b1]) as f64,
+            ('i', 4) => i32::from_le_bytes([b0, b1, b2, b3]) as f64,
             ('i', 8) => i64::from_le_bytes(buf) as f64,
-            ('u', 1) => buf[0] as f64,
-            ('u', 2) => u16::from_le_bytes(buf[..2].try_into().unwrap()) as f64,
-            ('u', 4) => u32::from_le_bytes(buf[..4].try_into().unwrap()) as f64,
+            ('u', 1) => b0 as f64,
+            ('u', 2) => u16::from_le_bytes([b0, b1]) as f64,
+            ('u', 4) => u32::from_le_bytes([b0, b1, b2, b3]) as f64,
             ('u', 8) => u64::from_le_bytes(buf) as f64,
             _ => f64::NAN,
         }

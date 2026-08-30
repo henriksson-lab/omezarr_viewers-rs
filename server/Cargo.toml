@@ -26,7 +26,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 log = "0.4"
 env_logger = "0.11"
 csv = "1"
+# Read-only, and without `arrow`: the record iterator is all a few hundred rows
+# of somebody else's ROI table needs, and the arrow stack is a lot of crates to
+# carry for it.
+parquet = { version = "59", default-features = false, features = ["snap", "flate2-rust_backend", "zstd", "brotli", "lz4"] }
+bytes = "1"
 memmap2 = "0.9"
 
 [dev-dependencies]
 tempfile = "3"
+# The parquet *writer*, for building a fixture the reader is asked to open.
+parquet = { version = "59", default-features = false, features = ["snap"] }

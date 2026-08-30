@@ -1,10 +1,12 @@
-//! The three shader programs.
+//! The five shader programs.
 //!
-//! All of them draw the same unit quad through the same camera transform, so
-//! the vertex attributes are pinned to explicit locations: one VAO is bound
-//! once and every program reads it. A program that let the linker choose its
-//! own attribute slots would need its own VAO, and the two would silently
-//! disagree the first time a shader gained an input.
+//! The tile and label programs draw the same unit quad through the same camera
+//! transform, so the vertex attributes are pinned to explicit locations: one VAO
+//! is bound once and both read it. A program that let the linker choose its own
+//! attribute slots would need its own VAO, and the two would silently disagree
+//! the first time a shader gained an input. The point and line programs bring
+//! their own VAOs — their vertices *are* the data — but pin their locations for
+//! the same reason.
 
 /// The camera half of the vertex shader, shared verbatim by every program.
 const CAMERA: &str = r#"
@@ -270,5 +272,109 @@ void main() {
     }
     if (alpha <= 0.0) discard;
     fragColor = vec4(rgb * alpha, alpha);
+}
+"#;
+
+/// Annotation boxes: a line loop per box, in world coordinates.
+///
+/// `LINES` rather than a filled quad because a box has to be a frame — the
+/// pixels it encloses are the reason it was drawn, and covering them with a
+/// translucent fill is how a stack of overlapping regions turns into a wash.
+/// The z range travels per vertex rather than per draw so one buffer holds every
+/// box in the layer, each fading at its own depth.
+pub fn line_vertex_shader() -> String {
+    format!(
+        r#"#version 300 es
+precision highp float;
+
+layout(location = 0) in vec2 a_xy;       // world (x, y)
+layout(location = 1) in vec2 a_zrange;   // the box's (z0, z1), world
+layout(location = 2) in float a_selected;
+{CAMERA}
+uniform float u_z;      // the slice being viewed, in world z
+uniform float u_slab;   // z distance beyond the box at which it fades out
+
+out float v_fade;
+out float v_selected;
+
+void main() {{
+    gl_Position = to_clip(a_xy);
+    // Distance *outside* the box's own z span: zero while the slice cuts it.
+    float dz = max(max(a_zrange.x - u_z, u_z - a_zrange.y), 0.0);
+    v_fade = u_slab > 0.0 ? clamp(1.0 - dz / u_slab, 0.0, 1.0) : 1.0;
+    v_selected = a_selected;
+}}
+"#
+    )
+}
+
+/// Annotation boxes: a flat colour, brightened when selected.
+pub const LINE_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+in float v_fade;
+in float v_selected;
+out vec4 fragColor;
+
+uniform vec3 u_color;
+uniform float u_opacity;
+
+void main() {
+    vec3 rgb = u_color;
+    float alpha = u_opacity * v_fade;
+    if (v_selected > 0.5) {
+        rgb = mix(rgb, vec3(1.0), 0.5);
+        alpha = min(1.0, alpha * 1.5 + 0.25);
+    }
+    if (alpha <= 0.0) discard;
+    // Premultiplied, like every other program here. See the label shader.
+    fragColor = vec4(rgb * alpha, alpha);
+}
+"#;
+
+/// Filled annotation regions: triangles in world coordinates.
+///
+/// Separate from the line program because the primitive is different, and
+/// separate from the tile program because there is no texture — a fill is one
+/// flat translucent colour, which is what QuPath draws and what keeps a stack
+/// of overlapping regions readable rather than opaque.
+pub fn fill_vertex_shader() -> String {
+    format!(
+        r#"#version 300 es
+precision highp float;
+
+layout(location = 0) in vec2 a_xy;       // world (x, y)
+layout(location = 1) in vec2 a_zrange;   // the shape's (z0, z1), world
+{CAMERA}
+uniform float u_z;      // the slice being viewed, in world z
+uniform float u_slab;   // z distance beyond the shape at which it fades out
+
+out float v_fade;
+
+void main() {{
+    gl_Position = to_clip(a_xy);
+    // Distance *outside* the shape's own z span: zero while the slice cuts it.
+    float dz = max(max(a_zrange.x - u_z, u_z - a_zrange.y), 0.0);
+    v_fade = u_slab > 0.0 ? clamp(1.0 - dz / u_slab, 0.0, 1.0) : 1.0;
+}}
+"#
+    )
+}
+
+/// A flat translucent fill.
+pub const FILL_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+in float v_fade;
+out vec4 fragColor;
+
+uniform vec3 u_color;
+uniform float u_opacity;
+
+void main() {
+    float alpha = u_opacity * v_fade;
+    if (alpha <= 0.0) discard;
+    // Premultiplied, like every other program here. See the label shader.
+    fragColor = vec4(u_color * alpha, alpha);
 }
 "#;

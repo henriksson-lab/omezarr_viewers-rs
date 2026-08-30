@@ -10,9 +10,17 @@
 //! it by a per-level scale, which is the only reason a coarser label volume
 //! lands on top of the image rather than in a corner of it.
 
-use omezarr_viewer_common::{DatasetInfo, LabelColor, LayerInfo, LayerKind, ObjectSchema};
+use omezarr_viewer_common::{
+    DatasetInfo, LabelColor, LabelProperty, LayerInfo, LayerKind, TableInfo,
+};
 
 use crate::controls::channel_panel;
+
+mod annotations;
+mod objects;
+
+pub use annotations::AnnotUiState;
+pub use objects::{ObjectData, ObjectUiState};
 
 /// UI state for a single channel: visibility, color, contrast, and opacity.
 #[derive(Clone, PartialEq)]
@@ -42,6 +50,41 @@ pub struct LabelUiState {
     pub only_selected: bool,
     /// `image-label` colours, when the store declared them.
     pub colors: Option<Vec<LabelColor>>,
+    /// `image-label` properties: what the store says about each id.
+    pub properties: Option<Vec<LabelProperty>>,
+    /// A feature table's column currently colouring these ids, as
+    /// `(layer id, column name)`.
+    ///
+    /// This is what a feature table is *for*: it has no coordinates, only a row
+    /// per label id, so the way to see it is to paint the ids it describes.
+    pub colored_by: Option<(String, String)>,
+}
+
+impl LabelUiState {
+    /// What the store says about one id, as a line of text.
+    ///
+    /// The spec lets each id carry a different set of keys, so this reports
+    /// whatever is there rather than looking for fields it hopes exist.
+    pub fn describe(&self, id: u64) -> Option<String> {
+        let entry = self
+            .properties
+            .as_ref()?
+            .iter()
+            .find(|p| p.label_value as u64 == id)?;
+        let described = entry
+            .fields
+            .iter()
+            .map(|(key, value)| {
+                let text = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                format!("{key} {text}")
+            })
+            .collect::<Vec<_>>()
+            .join(" \u{00b7} ");
+        (!described.is_empty()).then_some(described)
+    }
 }
 
 impl Default for LabelUiState {
@@ -52,113 +95,61 @@ impl Default for LabelUiState {
             selected: 0,
             only_selected: false,
             colors: None,
+            properties: None,
+            colored_by: None,
         }
     }
 }
 
-/// UI state for an object layer.
+/// UI state for a table layer — rows with no geometry of their own.
 #[derive(Clone, PartialEq)]
-pub struct ObjectUiState {
-    pub schema: ObjectSchema,
-    pub count: u64,
-    pub color: [f32; 3],
-    pub opacity: f32,
-    /// Sprite diameter in screen pixels.
-    pub size: f32,
-    /// Rings rather than discs, so the pixels underneath stay visible.
-    pub hollow: bool,
-    /// Which column colours the points, if any.
-    pub color_by: Option<usize>,
-    /// Per-column `(min, max)` filter, when one is set.
-    pub filters: Vec<Option<(f32, f32)>>,
-    /// How far from the current z a point may be before it fades out. Zero for
-    /// a set with no z, which is every 2D detector's.
-    pub slab: f32,
-    /// The row the last click selected.
-    pub selected_row: Option<u32>,
-    /// What the last fetch returned, and how much matched before the cap.
-    pub loaded: usize,
-    pub total: usize,
-    /// Rows filtered out on the client, of `loaded`.
-    pub shown: usize,
+pub struct TableUiState {
+    pub table: TableInfo,
+    /// Rows fetched so far, as text. The first page arrives with the session.
+    pub rows: Vec<Vec<String>>,
+    /// Where the next page starts.
+    pub offset: usize,
+    pub loading: bool,
+    /// The column this table is currently painting a label layer with.
+    pub coloring: Option<String>,
+    /// The label layer it is painting, once one has been matched.
+    pub target: Option<String>,
 }
 
-impl ObjectUiState {
-    fn new(schema: ObjectSchema, count: u64) -> Self {
-        let filters = vec![None; schema.columns.len()];
-        let slab = if schema.has_z { 8.0 } else { 0.0 };
+impl TableUiState {
+    pub fn new(table: TableInfo) -> Self {
         Self {
-            schema,
-            count,
-            color: [1.0, 0.85, 0.2],
-            opacity: 0.9,
-            size: 9.0,
-            hollow: false,
-            color_by: None,
-            filters,
-            slab,
-            selected_row: None,
-            loaded: 0,
-            total: 0,
-            shown: 0,
+            rows: table.preview.clone(),
+            offset: table.preview.len(),
+            table,
+            loading: false,
+            coloring: None,
+            target: None,
         }
     }
 }
 
-/// The rows one object layer currently has on the client.
+/// The point shader's ramp, on the CPU: dark blue to teal to green to yellow.
 ///
-/// Held whole rather than only as a GPU buffer so that filtering and
-/// colour-by are instant: they rebuild the buffer from these arrays without
-/// another round trip.
-#[derive(Clone, Default, PartialEq)]
-pub struct ObjectData {
-    pub positions: Vec<[f32; 3]>,
-    pub rows: Vec<u32>,
-    /// One array per schema column, in schema order.
-    pub columns: Vec<Vec<f32>>,
-}
-
-impl ObjectData {
-    pub fn len(&self) -> usize {
-        self.positions.len()
+/// The same one the object layer uses, so a measurement means the same colour
+/// whether it is drawn as a point or painted onto a label image.
+fn ramp(t: f32) -> [u8; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let stops = [
+        [0.27, 0.00, 0.33],
+        [0.13, 0.42, 0.56],
+        [0.15, 0.68, 0.49],
+        [0.99, 0.91, 0.15],
+    ];
+    let scaled = t * 3.0;
+    let i = (scaled.floor() as usize).min(2);
+    let f = scaled - i as f32;
+    let mut out = [0u8; 3];
+    for channel in 0..3 {
+        let value = stops[i][channel] + (stops[i + 1][channel] - stops[i][channel]) * f;
+        out[channel] = (value * 255.0).clamp(0.0, 255.0) as u8;
     }
-
-    /// Build the interleaved `(z, y, x, value, row)` buffer the point shader
-    /// reads, applying the layer's filters.
-    pub fn to_vertices(&self, state: &ObjectUiState) -> (Vec<f32>, usize) {
-        let mut out = Vec::with_capacity(self.len() * 5);
-        let mut shown = 0;
-        for row in 0..self.len() {
-            if !self.passes(state, row) {
-                continue;
-            }
-            let position = self.positions[row];
-            out.extend_from_slice(&[position[0], position[1], position[2]]);
-            let value = state
-                .color_by
-                .and_then(|column| self.columns.get(column))
-                .and_then(|values| values.get(row))
-                .copied()
-                .unwrap_or(0.0);
-            out.push(value);
-            out.push(self.rows.get(row).copied().unwrap_or(row as u32) as f32);
-            shown += 1;
-        }
-        (out, shown)
-    }
-
-    fn passes(&self, state: &ObjectUiState, row: usize) -> bool {
-        for (column, filter) in state.filters.iter().enumerate() {
-            let Some((lo, hi)) = filter else { continue };
-            let Some(value) = self.columns.get(column).and_then(|v| v.get(row)) else {
-                continue;
-            };
-            if value.is_nan() || *value < *lo || *value > *hi {
-                return false;
-            }
-        }
-        true
-    }
+    out
 }
 
 /// What kind of layer this is, and the state that kind carries.
@@ -170,6 +161,8 @@ pub enum LayerUi {
     },
     Labels(LabelUiState),
     Objects(ObjectUiState),
+    Annotations(AnnotUiState),
+    Table(TableUiState),
 }
 
 /// One layer as the frontend holds it.
@@ -217,13 +210,16 @@ impl LayerState {
                 })
             }
             LayerKind::Labels {
-                dataset, colors, ..
+                dataset,
+                colors,
+                properties,
             } => Some(Self {
                 id: info.id.clone(),
                 name: info.name.clone(),
                 visible: true,
                 ui: LayerUi::Labels(LabelUiState {
                     colors: colors.clone(),
+                    properties: properties.clone(),
                     ..LabelUiState::default()
                 }),
                 dataset: Some(dataset.clone()),
@@ -235,6 +231,23 @@ impl LayerState {
                 dataset: None,
                 ui: LayerUi::Objects(ObjectUiState::new(schema.clone(), *count)),
             }),
+            LayerKind::Table { table } => Some(Self {
+                id: info.id.clone(),
+                name: info.name.clone(),
+                visible: true,
+                dataset: None,
+                ui: LayerUi::Table(TableUiState::new(table.clone())),
+            }),
+            LayerKind::Annotations {
+                annotations,
+                target,
+            } => Some(Self {
+                id: info.id.clone(),
+                name: info.name.clone(),
+                visible: true,
+                dataset: None,
+                ui: LayerUi::Annotations(AnnotUiState::new(annotations.clone(), target.clone())),
+            }),
         }
     }
 
@@ -244,6 +257,14 @@ impl LayerState {
 
     pub fn is_objects(&self) -> bool {
         matches!(self.ui, LayerUi::Objects(_))
+    }
+
+    pub fn is_annotations(&self) -> bool {
+        matches!(self.ui, LayerUi::Annotations(_))
+    }
+
+    pub fn is_table(&self) -> bool {
+        matches!(self.ui, LayerUi::Table(_))
     }
 
     /// The length of a named axis at level 0, or 1 when the axis is absent.
@@ -306,6 +327,9 @@ impl LayerState {
                 .bounds
                 .map(|b| ((b[5] + 1.0) as f32, (b[4] + 1.0) as f32))
                 .unwrap_or((1.0, 1.0)),
+            // An annotation layer never defines the world: it is drawn *onto*
+            // one, and a session of nothing but annotations has no pixels to
+            // put a camera on.
             _ => (1.0, 1.0),
         }
     }
@@ -393,6 +417,42 @@ impl LayerState {
     /// A table is refused above 65536 entries: an atlas with ids in the
     /// millions would want a hash map on the GPU, and until one exists the hash
     /// colouring is the honest answer rather than a 4 MB texture of holes.
+    /// A colour table built from a feature column: id → a ramp position.
+    ///
+    /// This is how a table with no coordinates gets drawn — every id the table
+    /// describes takes the colour of its measurement, and the label image it
+    /// describes becomes a heat map of that column.
+    pub fn measurement_lut(labels: &[u64], values: &[f64]) -> Option<Vec<u8>> {
+        let max_id = labels.iter().copied().max()?;
+        if max_id > 65_535 {
+            // The same ceiling the colour table has: an atlas with ids in the
+            // millions wants a hash map on the GPU, not a 4 MB texture of holes.
+            return None;
+        }
+        let (lo, hi) = values
+            .iter()
+            .filter(|v| v.is_finite())
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+                (lo.min(*v), hi.max(*v))
+            });
+        let span = (hi - lo).max(f64::MIN_POSITIVE);
+        let mut rgba = vec![0u8; (max_id as usize + 1) * 4];
+        for (id, value) in labels.iter().zip(values) {
+            if !value.is_finite() {
+                continue;
+            }
+            let [r, g, b] = ramp(((value - lo) / span) as f32);
+            let at = *id as usize * 4;
+            rgba[at] = r;
+            rgba[at + 1] = g;
+            rgba[at + 2] = b;
+            // Opaque, so the shader knows the table names this id — a zero
+            // alpha is how it says "not in the table".
+            rgba[at + 3] = 255;
+        }
+        Some(rgba)
+    }
+
     pub fn label_lut(&self) -> Option<Vec<u8>> {
         let LayerUi::Labels(state) = &self.ui else {
             return None;
@@ -491,4 +551,39 @@ fn parse_hex_color(hex: &str) -> Option<[f32; 3]> {
     let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
     Some([r, g, b])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Alpha is how the shader knows the table names an id at all.
+    fn named(lut: &[u8], id: usize) -> bool {
+        lut[id * 4 + 3] == 255
+    }
+
+    #[test]
+    fn a_measurement_lut_maps_every_id_and_leaves_the_rest_transparent() {
+        let lut = LayerState::measurement_lut(&[1, 3], &[0.0, 100.0]).expect("a table");
+        assert_eq!(lut.len(), 4 * 4, "sized to the largest id");
+        let named: Vec<bool> = (0..4).map(|id| named(&lut, id)).collect();
+        assert_eq!(named, vec![false, true, false, true], "only the listed ids");
+        // Ends of the ramp differ, which is the whole point of colouring by it.
+        assert_ne!(&lut[4..7], &lut[12..15]);
+    }
+
+    #[test]
+    fn a_measurement_lut_refuses_ids_too_big_for_a_texture() {
+        // An atlas with ids in the millions wants a hash map on the GPU, not a
+        // texture of holes; the honest answer is to decline.
+        assert!(LayerState::measurement_lut(&[70_000], &[1.0]).is_none());
+        assert!(LayerState::measurement_lut(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn a_non_finite_measurement_colours_nothing() {
+        let lut = LayerState::measurement_lut(&[1, 2], &[f64::NAN, 5.0]).expect("a table");
+        assert!(!named(&lut, 1), "NaN leaves the id unnamed");
+        assert!(named(&lut, 2));
+    }
 }

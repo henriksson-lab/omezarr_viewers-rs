@@ -508,3 +508,208 @@ body {
     text-align: right;
     color: #e94560;
 }
+
+/* --- Annotation drawing ------------------------------------------------- */
+
+/* A drawing tool takes the drag from the camera, so the cursor has to say so
+   before the drag starts — otherwise the first box is drawn by surprise. */
+.viewer-canvas.drawing {
+    cursor: crosshair;
+}
+
+.toolbar {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 20;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    padding: 4px;
+    background: rgba(13, 13, 26, 0.85);
+    border: 1px solid #1a1a3e;
+    border-radius: 6px;
+}
+
+.tool-button {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    font-size: 14px;
+    line-height: 1;
+    color: #ccc;
+    background: #16213e;
+    border: 1px solid #1a1a3e;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.tool-button:hover {
+    background: #1f2a4d;
+}
+
+.tool-button.active {
+    color: #fff;
+    background: #e94560;
+    border-color: #e94560;
+}
+
+.toolbar select {
+    max-width: 130px;
+    font-size: 11px;
+}
+
+.annot-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    margin: 6px 0;
+}
+
+.annot-row td {
+    padding: 1px 2px;
+    border-bottom: 1px solid #1a1a3e;
+}
+
+.annot-row input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 11px;
+}
+
+/* The kind glyph doubles as the select target, so it needs to look clickable
+   even though it is a table cell rather than a button. */
+.annot-kind {
+    width: 16px;
+    text-align: center;
+    color: #7ee3ff;
+    cursor: pointer;
+    user-select: none;
+}
+
+.annot-row.selected td {
+    background: rgba(233, 69, 96, 0.18);
+}
+
+.annot-row.selected .annot-kind {
+    color: #fff;
+}
+
+/* Unsaved work, and the class key --------------------------------------- */
+
+/* A mark in the layer header, so "there is work here" is visible without
+   opening the layer or reading the status line. */
+.dirty-dot {
+    margin-left: 4px;
+    color: #e94560;
+    font-size: 9px;
+    vertical-align: middle;
+}
+
+.unsaved {
+    margin-left: 4px;
+    padding: 2px 6px;
+    font-size: 10px;
+    color: #e94560;
+    background: rgba(233, 69, 96, 0.15);
+    border: 1px solid rgba(233, 69, 96, 0.4);
+    border-radius: 4px;
+}
+
+.tool-button:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.class-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    margin: 4px 0;
+    font-size: 10px;
+    color: #ccc;
+}
+
+.class-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.class-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    border: 1px solid #1a1a3e;
+}
+
+/* The second click of "delete shown" — armed, and saying so. */
+button.danger {
+    background: #e94560;
+    color: #fff;
+    border-color: #e94560;
+}
+
+/* The tool bar grew from three buttons to eight, so it wraps rather than
+   running off the canvas on a narrow window. */
+.toolbar {
+    flex-wrap: wrap;
+    max-width: 60%;
+}
+
+.hint {
+    color: #7a7a99;
+    font-size: 10px;
+    line-height: 1.4;
+}
+
+/* The nesting count beside a parent row: how many shapes are inside it. */
+.annot-children {
+    width: 14px;
+    text-align: right;
+    font-size: 9px;
+    color: #7a7a99;
+}
+
+/* A table layer's rows. Scrolls in its own box rather than stretching the
+   panel, and the cells are terse — a feature table has a column per
+   measurement and there can be a lot of them. */
+.table-scroll {
+    max-height: 240px;
+    overflow: auto;
+    margin: 4px 0;
+    border: 1px solid #1a1a3e;
+    border-radius: 4px;
+}
+
+.data-table {
+    border-collapse: collapse;
+    font-size: 10px;
+    width: 100%;
+}
+
+.data-table th {
+    position: sticky;
+    top: 0;
+    background: #16213e;
+    color: #ccc;
+    text-align: left;
+    padding: 3px 5px;
+    white-space: nowrap;
+    border-bottom: 1px solid #1a1a3e;
+}
+
+.data-table td {
+    padding: 2px 5px;
+    color: #bbb;
+    white-space: nowrap;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-bottom: 1px solid #14142e;
+}
+
+.data-table tr:hover td {
+    background: rgba(233, 69, 96, 0.1);
+}

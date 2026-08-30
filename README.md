@@ -149,3 +149,76 @@ A Cargo workspace of four crates:
 
 `GET /api/info` and `POST /api/open` remain for the single-dataset S3 flow the
 viewer started with.
+
+Annotations add:
+
+| Endpoint | Answers |
+|---|---|
+| `POST /api/annotations/layers` | start an empty annotation layer |
+| `GET`/`POST /api/annotations/{layer}` | the shapes; add one (nested by containment) |
+| `PUT`/`DELETE /api/annotations/{layer}/{id}` | edit one; delete one, keeping what was inside it |
+| `POST /api/annotations/{layer}/{id}/detach` | lift one out of its parent |
+| `POST /api/annotations/{layer}/renest` | rebuild the hierarchy from where shapes now are |
+| `POST /api/annotations/{layer}/save` | write to disk — GeoJSON or an ROI table, by target shape |
+| `GET /api/annotations/tables` | the annotation sets and ROI tables a store holds |
+
+## Known gaps
+
+Recorded so they can be picked up rather than rediscovered. `PLAN.md` has the
+reasoning behind each; `info_roi.md` and `info_annotation_formats.md` have the
+format research. **`QUALITY.md` tracks the separate question of how trustworthy
+the code that exists is** — test coverage, file sizes, error handling — rather
+than what it cannot yet do.
+
+### Annotation formats
+
+- **No OME-XML export.** A mechanical downgrade from the GeoJSON we write
+  (polygonise ellipses, flatten the hierarchy, move measurements to a
+  `MapAnnotation`) — but holes have no representation in OME-XML at all, so it
+  is lossy by the format's own limits, not ours.
+- **No raster brush.** A painted annotation belongs in a `labels` image, which
+  *is* in the OME-Zarr spec and which this viewer already reads — but nothing
+  writes one yet. This is also where a rasterised polygon would land.
+
+### Tables
+
+- **A `condition_table` is shown but not used.** It is experiment-level
+  metadata; nothing yet reads it into the session's own description of the
+  dataset.
+- **A `masking_roi_table` opens as boxes and keeps its `region` link, but does
+  not use it.** Its rows could paint the label image the way a feature table's
+  do; only the feature-table path is wired.
+- **A table cannot be sorted or filtered** in the view, and a picked label id
+  does not scroll its row into view.
+- **`obsm` keys other than `spatial` are ignored** — a UMAP or a PCA embedding
+  under `obsm` is not a position and is not offered as one.
+- **A remote AnnData table is not read at all.** CSV, JSON and Parquet come back
+  from an `s3://` or `http(s)://` store because each is one payload key to
+  fetch; AnnData is a group of arrays, and the reader that walks them is the
+  synchronous one. `read_async` says so rather than failing obscurely.
+
+### Annotation round trips
+
+- **Colour alpha is dropped** (`[r,g,b,a]` → `[r,g,b]`): nothing draws a
+  per-object alpha.
+- **Non-finite measurements are dropped.** QuPath writes them as the *strings*
+  `"NaN"`/`"Infinity"`; turning those into a number would be wrong differently.
+- **`nucleusGeometry` is drawn but not editable** — a cell's nucleus outline
+  shows, and survives the round trip, but the drag handles only ever address the
+  main geometry.
+
+### Saving
+
+- **Nothing is written to disk until Save.** Every edit reaches the server
+  immediately, so reloading the page is safe, but a server restart loses
+  unsaved work with no warning — the browser's unload guard cannot fire for a
+  process being killed. A crash-safe autosave beside the real file (recovered on
+  open, deleted on save) would close this without making the viewer write to a
+  dataset unasked.
+
+### Other
+
+- **`--allow-remote-writes` is all-or-nothing.** There is no per-store or
+  per-bucket grant.
+- **Vessel graphs** remain blocked upstream: `clearmap-ng`'s `VesselGraph` has
+  no canonical byte form (PLAN.md phase 7).

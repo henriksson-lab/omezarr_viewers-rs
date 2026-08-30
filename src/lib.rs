@@ -193,12 +193,36 @@ pub enum LayerKind {
         /// OME-NGFF `image-label` colours, when the store declares them.
         #[serde(default)]
         colors: Option<Vec<LabelColor>>,
-        /// Id of an object layer whose rows describe these ids, when one is loaded.
+        /// OME-NGFF `image-label` properties: what the store says about each id.
         #[serde(default)]
-        properties: Option<String>,
+        properties: Option<Vec<LabelProperty>>,
     },
     /// A set of objects: a position per row plus typed columns.
     Objects { schema: ObjectSchema, count: u64 },
+    /// A table with no geometry of its own.
+    ///
+    /// An ngio **feature table** is per-object measurements keyed to a label
+    /// image — one row per label id, `area`, `intensity_mean` and so on — and
+    /// carries *no coordinates at all*: where a row is, is wherever its id sits
+    /// in the label image `region` names. A **condition table** is
+    /// experiment-level metadata and has no position even in principle.
+    ///
+    /// So this layer draws nothing by itself. It is shown as a table, and where
+    /// it names a label image that is open, it can colour that layer's ids by
+    /// one of its columns.
+    Table { table: TableInfo },
+    /// Boxes and points drawn in the viewer, held in world coordinates.
+    ///
+    /// The only layer kind the viewer *writes*. It carries its rows inline
+    /// rather than behind a query endpoint: an annotation set is the size of
+    /// what a person drew by hand, and every edit needs the whole list anyway.
+    Annotations {
+        annotations: Vec<Annotation>,
+        /// Where `POST /api/annotations/{layer}/save` would write, when the
+        /// layer was read from — or has already been saved to — an ROI table.
+        #[serde(default)]
+        target: Option<String>,
+    },
 }
 
 /// One entry of an OME-NGFF `image-label` colour table.
@@ -208,6 +232,59 @@ pub struct LabelColor {
     pub label_value: f64,
     /// RGBA, 0-255.
     pub rgba: Option<[i32; 4]>,
+}
+
+/// A table layer's shape and a first page of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableInfo {
+    /// What the file declares: `feature_table`, `condition_table`, or whatever
+    /// a foreign writer put there.
+    pub table_type: String,
+    pub columns: Vec<TableColumn>,
+    /// How many rows there are, which may be more than `preview` holds.
+    pub rows: usize,
+    /// The label image its rows describe, relative to the table group.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// The column holding the label id each row belongs to.
+    #[serde(default)]
+    pub instance_key: Option<String>,
+    /// The first rows, as text, so the table can be shown without a second
+    /// request. Everything past this is paged.
+    #[serde(default)]
+    pub preview: Vec<Vec<String>>,
+}
+
+/// One column of a table layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TableColumn {
+    pub name: String,
+    /// `"number"` or `"text"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Observed range, for colouring a label image by this column.
+    #[serde(default)]
+    pub range: Option<[f64; 2]>,
+}
+
+impl TableColumn {
+    pub fn is_number(&self) -> bool {
+        self.kind == "number"
+    }
+}
+
+/// One entry of an OME-NGFF `image-label` properties table.
+///
+/// The spec allows an arbitrary number of key/value pairs per id, and says
+/// outright that rows need not share keys — so the extra fields are kept as the
+/// JSON they arrived as rather than fitted to a struct that would have to guess
+/// which ones exist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabelProperty {
+    #[serde(rename = "label-value")]
+    pub label_value: f64,
+    #[serde(flatten)]
+    pub fields: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The columns an object layer carries, beside the position every row has.
@@ -232,4 +309,47 @@ pub struct ObjectColumn {
     /// Observed range, for auto-scaling a filter slider.
     #[serde(default)]
     pub range: Option<[f64; 2]>,
+}
+
+// ---------------------------------------------------------------------------
+// Annotations
+//
+// The model lives in `annotation.rs`: QuPath's, because OME-Zarr specifies no
+// vector annotation at all and QuPath's is the one the tool we mean to replace
+// reads and writes. See `info_annotation_formats.md`.
+// ---------------------------------------------------------------------------
+
+pub mod annotation;
+pub use annotation::{
+    containing_parent, in_tree_order, pick_annotation, Annotation, Geometry, ObjectType, Plane,
+    Point, Ring,
+};
+
+/// How world coordinates convert to the units an ROI table declares.
+///
+/// The ROI-table convention names its columns `*_micrometer` and `t_second`,
+/// and the only statement OME-Zarr makes about either is the
+/// `coordinateTransformations` scale on the reference image. When a store says
+/// nothing the factor is 1 and a written "micrometre" is a pixel — which is why
+/// the values used are recorded in the table's own attributes rather than left
+/// to be guessed by whoever reads it back.
+///
+/// GeoJSON annotations need none of this: QuPath's coordinates are
+/// full-resolution pixels with the origin top-left, which is exactly this
+/// viewer's world, so they are written unconverted.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WorldScale {
+    /// Micrometres per world pixel, `(z, y, x)`.
+    pub voxel: [f64; 3],
+    /// Seconds per frame, for `t_second`.
+    pub seconds: f64,
+}
+
+impl Default for WorldScale {
+    fn default() -> Self {
+        WorldScale {
+            voxel: [1.0, 1.0, 1.0],
+            seconds: 1.0,
+        }
+    }
 }

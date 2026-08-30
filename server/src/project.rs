@@ -112,6 +112,26 @@ impl Project {
         images.sort();
         volumes.sort();
         objects.sort();
+        // An ROI table lives *inside* a store, which `walk` deliberately does
+        // not descend into — so the tables are asked for per store rather than
+        // stumbled upon. This is what makes reopening a run show the boxes
+        // somebody drew over it last time.
+        let annotations: Vec<PathBuf> = images
+            .iter()
+            .flat_map(|store| {
+                let tables = crate::annotations::roi_table::list(store)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|name| store.join("tables").join(name));
+                let sets = crate::annotations::geojson::list(store)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|name| store.join("annotations").join(name));
+                // Hand-drawn work after machine tables, so it draws on top.
+                tables.chain(sets).collect::<Vec<_>>()
+            })
+            .collect();
+
         let layers = images
             .into_iter()
             .map(|path| layer(root, path, None))
@@ -120,6 +140,11 @@ impl Project {
                 objects
                     .into_iter()
                     .map(|path| layer(root, path, Some("objects"))),
+            )
+            .chain(
+                annotations
+                    .into_iter()
+                    .map(|path| layer(root, path, Some("annotations"))),
             )
             .collect();
 

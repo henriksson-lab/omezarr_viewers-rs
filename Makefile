@@ -14,6 +14,12 @@ build:
 	cd app && trunk build --release
 	cargo build --release
 
+# The frontend has no unit tests; it is checked by driving a real browser.
+# Needs Chrome and `pip install websocket-client pillow` — see
+# tests/browser/README.md. `make build` first: the server serves dist/.
+test-browser:
+	python3 tests/browser/run.py
+
 dev-app:
 	mkdir -p app/assets
 	cd app && trunk watch
@@ -59,13 +65,14 @@ demo:
 # Clippy caches by crate fingerprint, so an unchanged crate is *not* re-linted
 # and a run can pass on stale results — which is how a lint that CI failed on
 # passed here first. Touching each crate root forces the lint to actually run.
+# `--workspace`, not `-p server`: the shared crate holds the geometry — hit
+# testing, holes, the hierarchy rule, vertex editing — and naming one crate is
+# how those went untested for as long as they did.
 test:
-	cargo test -p server
+	cargo test --workspace
 	@touch src/lib.rs server/src/lib.rs app/src/main.rs desktop/src/main.rs
-	cargo clippy -p omezarr-viewer-common --all-targets -- -D warnings
-	cargo clippy -p server --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 	cd app && cargo clippy --target wasm32-unknown-unknown -- -D warnings
-	cargo clippy -p omezarr-viewer-desktop --all-targets -- -D warnings
 	cargo fmt --all -- --check
 
 clean:

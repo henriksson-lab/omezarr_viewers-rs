@@ -153,6 +153,10 @@ fn run_server(cli: Cli, report: mpsc::Sender<SocketAddr>) -> anyhow::Result<()> 
                 Some(path) => Some(std::sync::Arc::new(server::ontology::Ontology::read(path)?)),
                 None => None,
             },
+            // The desktop shell opens local files through a native dialog and
+            // holds no remote credentials, so there is nothing here for the
+            // flag to unlock.
+            allow_remote_writes: false,
         });
 
         let server = HttpServer::new(move || {
@@ -173,6 +177,20 @@ fn run_server(cli: Cli, report: mpsc::Sender<SocketAddr>) -> anyhow::Result<()> 
                 .service(api::open_project)
                 .service(api::add_layer)
                 .service(api::remove_layer)
+                // `/tables` and `/layers` are literal segments that would also
+                // match `/{layer}`, so they are registered first: actix takes
+                // the first route that matches, not the most specific.
+                .service(api::list_tables)
+                .service(api::table_rows)
+                .service(api::table_column)
+                .service(api::add_annotation_layer)
+                .service(api::annotations)
+                .service(api::add_annotation)
+                .service(api::save_annotations)
+                .service(api::renest_annotations)
+                .service(api::detach_annotation)
+                .service(api::update_annotation)
+                .service(api::remove_annotation)
                 .default_service(web::to(embedded))
         })
         // Port 0: the OS picks, and nothing has to be free for the app to start.

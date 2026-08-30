@@ -39,6 +39,53 @@ pub struct PointBuffer {
     pub count: usize,
 }
 
+/// A batch of annotation box outlines on the GPU.
+pub struct LineBuffer {
+    vao: web_sys::WebGlVertexArrayObject,
+    buffer: web_sys::WebGlBuffer,
+    /// Vertices, not boxes: `GL_LINES` consumes them two at a time.
+    pub count: usize,
+}
+
+/// A batch of filled annotation regions on the GPU.
+pub struct FillBuffer {
+    vao: web_sys::WebGlVertexArrayObject,
+    buffer: web_sys::WebGlBuffer,
+    /// Vertices, three to a triangle.
+    pub count: usize,
+}
+
+/// How an annotation layer's fills are drawn.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FillRenderInfo {
+    pub color: [f32; 3],
+    pub opacity: f32,
+    pub z: f32,
+    pub slab: f32,
+}
+
+/// How an annotation layer's outlines are drawn.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LineRenderInfo {
+    pub color: [f32; 3],
+    pub opacity: f32,
+    /// The world z the viewer is on, and how far *outside* a box's own z span
+    /// it may be before the box fades out entirely. A slab of 0 disables it.
+    pub z: f32,
+    pub slab: f32,
+}
+
+impl Default for LineRenderInfo {
+    fn default() -> Self {
+        Self {
+            color: [0.2, 0.9, 1.0],
+            opacity: 0.95,
+            z: 0.0,
+            slab: 0.0,
+        }
+    }
+}
+
 /// How an object layer is drawn.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PointRenderInfo {
@@ -261,6 +308,17 @@ impl Renderer {
         }
         self.luts.insert(layer.to_string(), (texture, width));
         Ok(())
+    }
+
+    /// Drop a layer's colour table, so its ids go back to the hash colouring.
+    ///
+    /// Needed because a measurement colouring is *installed* over whatever the
+    /// store declared, and switching it off has to leave the layer as it was
+    /// rather than as a table of holes.
+    pub fn clear_label_lut(&mut self, layer: &str) {
+        if let Some((texture, _)) = self.luts.remove(layer) {
+            self.ctx.gl.delete_texture(Some(&texture));
+        }
     }
 
     pub fn has_label_lut(&self, layer: &str) -> bool {
@@ -528,6 +586,145 @@ impl Renderer {
         }
 
         gl.draw_arrays(WebGl2RenderingContext::POINTS, 0, points.count as i32);
+    }
+
+    /// Upload one batch of box outlines.
+    ///
+    /// `data` is interleaved `(x, y, z0, z1, selected)` per vertex, two vertices
+    /// per segment and four segments per box — the whole layer in one buffer and
+    /// one draw call.
+    pub fn upload_lines(&self, data: &[f32]) -> Result<LineBuffer, String> {
+        let gl = &self.ctx.gl;
+        let vao = gl
+            .create_vertex_array()
+            .ok_or("Failed to create line VAO")?;
+        let buffer = gl.create_buffer().ok_or("Failed to create line buffer")?;
+        gl.bind_vertex_array(Some(&vao));
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
+        unsafe {
+            let array = Float32Array::view(data);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &array,
+                WebGl2RenderingContext::STATIC_DRAW,
+            );
+        }
+        let stride = 5 * 4;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 2, WebGl2RenderingContext::FLOAT, false, stride, 8);
+        gl.enable_vertex_attrib_array(2);
+        gl.vertex_attrib_pointer_with_i32(2, 1, WebGl2RenderingContext::FLOAT, false, stride, 16);
+        gl.bind_vertex_array(None);
+
+        Ok(LineBuffer {
+            vao,
+            buffer,
+            count: data.len() / 5,
+        })
+    }
+
+    /// Release a line batch's GPU memory.
+    pub fn delete_lines(&self, lines: &LineBuffer) {
+        let gl = &self.ctx.gl;
+        gl.delete_buffer(Some(&lines.buffer));
+        gl.delete_vertex_array(Some(&lines.vao));
+    }
+
+    /// Draw one batch of box outlines.
+    pub fn draw_lines(&self, lines: &LineBuffer, placement: &TilePlacement, info: &LineRenderInfo) {
+        if lines.count == 0 {
+            return;
+        }
+        let gl = &self.ctx.gl;
+        let program = &self.ctx.line_program;
+        gl.use_program(Some(program));
+        gl.bind_vertex_array(Some(&lines.vao));
+        self.set_camera(program, placement);
+
+        for (name, value) in [
+            ("u_z", info.z),
+            ("u_slab", info.slab),
+            ("u_opacity", info.opacity),
+        ] {
+            if let Some(loc) = gl.get_uniform_location(program, name) {
+                gl.uniform1f(Some(&loc), value);
+            }
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_color") {
+            gl.uniform3f(Some(&loc), info.color[0], info.color[1], info.color[2]);
+        }
+
+        gl.draw_arrays(WebGl2RenderingContext::LINES, 0, lines.count as i32);
+    }
+
+    /// Upload one batch of fill triangles.
+    ///
+    /// `data` is interleaved `(x, y, z0, z1)` per vertex, three vertices per
+    /// triangle — the whole layer's fills in one buffer and one draw call.
+    pub fn upload_fills(&self, data: &[f32]) -> Result<FillBuffer, String> {
+        let gl = &self.ctx.gl;
+        let vao = gl
+            .create_vertex_array()
+            .ok_or("Failed to create fill VAO")?;
+        let buffer = gl.create_buffer().ok_or("Failed to create fill buffer")?;
+        gl.bind_vertex_array(Some(&vao));
+        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
+        unsafe {
+            let array = Float32Array::view(data);
+            gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &array,
+                WebGl2RenderingContext::STATIC_DRAW,
+            );
+        }
+        let stride = 4 * 4;
+        gl.enable_vertex_attrib_array(0);
+        gl.vertex_attrib_pointer_with_i32(0, 2, WebGl2RenderingContext::FLOAT, false, stride, 0);
+        gl.enable_vertex_attrib_array(1);
+        gl.vertex_attrib_pointer_with_i32(1, 2, WebGl2RenderingContext::FLOAT, false, stride, 8);
+        gl.bind_vertex_array(None);
+
+        Ok(FillBuffer {
+            vao,
+            buffer,
+            count: data.len() / 4,
+        })
+    }
+
+    /// Release a fill batch's GPU memory.
+    pub fn delete_fills(&self, fills: &FillBuffer) {
+        let gl = &self.ctx.gl;
+        gl.delete_buffer(Some(&fills.buffer));
+        gl.delete_vertex_array(Some(&fills.vao));
+    }
+
+    /// Draw one batch of filled regions.
+    pub fn draw_fills(&self, fills: &FillBuffer, placement: &TilePlacement, info: &FillRenderInfo) {
+        if fills.count == 0 {
+            return;
+        }
+        let gl = &self.ctx.gl;
+        let program = &self.ctx.fill_program;
+        gl.use_program(Some(program));
+        gl.bind_vertex_array(Some(&fills.vao));
+        self.set_camera(program, placement);
+
+        for (name, value) in [
+            ("u_z", info.z),
+            ("u_slab", info.slab),
+            ("u_opacity", info.opacity),
+        ] {
+            if let Some(loc) = gl.get_uniform_location(program, name) {
+                gl.uniform1f(Some(&loc), value);
+            }
+        }
+        if let Some(loc) = gl.get_uniform_location(program, "u_color") {
+            gl.uniform3f(Some(&loc), info.color[0], info.color[1], info.color[2]);
+        }
+
+        gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, fills.count as i32);
     }
 
     /// Clear the framebuffer to the background color.

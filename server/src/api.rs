@@ -1,8 +1,11 @@
-use actix_web::{delete, get, post, web, HttpResponse, Responder};
+use actix_web::{delete, get, post, put, web, HttpResponse, Responder};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use omezarr_viewer_common::Annotation;
+
+use crate::annotations::{geojson, roi_table, AnnotationSet};
 use crate::cache::{TileCache, TileKey};
 use crate::objects::{ObjectQuery, ObjectSpace};
 use crate::ontology::{Ontology, RegionCount};
@@ -22,6 +25,11 @@ pub struct AppState {
     pub s3_config: Option<S3Config>,
     /// Region names for label ids, when an atlas ontology was given.
     pub ontology: Option<Arc<Ontology>>,
+    /// May annotations be written to `s3://` and `http(s)://` targets?
+    ///
+    /// Off unless the operator said otherwise: the credentials this server holds
+    /// were given to it for reading.
+    pub allow_remote_writes: bool,
 }
 
 /// Handle GET /api/session — every open layer, in draw order.
@@ -676,6 +684,11 @@ pub async fn save_project(data: web::Data<AppState>) -> impl Responder {
     let layers = session
         .layers()
         .iter()
+        // A project file records where things live. An annotation layer that
+        // has never been saved lives nowhere, so writing an entry for it would
+        // put a source in the file that can never be opened — better to leave
+        // it out than to promise a layer the file cannot deliver.
+        .filter(|layer| !layer.spec.is_unsaved())
         .map(|layer| ProjectLayer {
             source: layer.spec.uri(),
             role: Some(layer.role().to_string()),
@@ -787,4 +800,476 @@ pub async fn remove_layer(data: web::Data<AppState>, path: web::Path<String>) ->
     } else {
         HttpResponse::NotFound().body(format!("no layer {id}"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Annotations
+//
+// The only mutable thing in a session, and so the only part of the API that is
+// not a read. Annotations live in memory until `save` writes them into a store
+// as an ngio ROI table; nothing here writes on its own, because a viewer that
+// silently edits the data it was pointed at is a viewer nobody can trust with a
+// dataset.
+// ---------------------------------------------------------------------------
+
+/// Body of POST /api/annotations/layers.
+#[derive(Deserialize)]
+pub struct NewAnnotationLayer {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Handle POST /api/annotations/layers — append an empty annotation layer.
+#[post("/api/annotations/layers")]
+pub async fn add_annotation_layer(
+    data: web::Data<AppState>,
+    body: web::Json<NewAnnotationLayer>,
+) -> impl Responder {
+    let mut session = data.session.write().await;
+    let name = body.into_inner().name.filter(|n| !n.trim().is_empty());
+    let id = session.add_annotations(name, AnnotationSet::new());
+    log::info!("added annotation layer {id}");
+    HttpResponse::Ok().json(session.info())
+}
+
+/// Handle GET /api/annotations/{layer} — every annotation in one layer.
+#[get("/api/annotations/{layer}")]
+pub async fn annotations(data: web::Data<AppState>, path: web::Path<String>) -> impl Responder {
+    let id = path.into_inner();
+    let session = data.session.read().await;
+    match session.get(&id).and_then(|layer| layer.data.annotations()) {
+        Some(set) => HttpResponse::Ok().json(set.items()),
+        None => HttpResponse::NotFound().body(format!("no annotation layer {id}")),
+    }
+}
+
+/// Handle POST /api/annotations/{layer} — add one annotation, id assigned here.
+#[post("/api/annotations/{layer}")]
+pub async fn add_annotation(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<Annotation>,
+) -> impl Responder {
+    let id = path.into_inner();
+    let mut session = data.session.write().await;
+    match session.annotations_mut(&id) {
+        // Nested, not merely appended: a shape drawn inside a region becomes a
+        // child of it, which is how QuPath's hierarchy works.
+        Some(set) => HttpResponse::Ok().json(set.add_nested(body.into_inner())),
+        None => HttpResponse::NotFound().body(format!("no annotation layer {id}")),
+    }
+}
+
+/// Handle PUT /api/annotations/{layer}/{id} — replace one annotation's geometry
+/// and class, keeping its id.
+#[put("/api/annotations/{layer}/{id}")]
+pub async fn update_annotation(
+    data: web::Data<AppState>,
+    path: web::Path<(String, u64)>,
+    body: web::Json<Annotation>,
+) -> impl Responder {
+    let (layer, annotation) = path.into_inner();
+    let mut session = data.session.write().await;
+    let Some(set) = session.annotations_mut(&layer) else {
+        return HttpResponse::NotFound().body(format!("no annotation layer {layer}"));
+    };
+    match set.update(annotation, body.into_inner()) {
+        Ok(updated) => HttpResponse::Ok().json(updated),
+        Err(e) => HttpResponse::NotFound().body(format!("Error: {e:#}")),
+    }
+}
+
+/// Handle DELETE /api/annotations/{layer}/{id} — drop one annotation.
+#[delete("/api/annotations/{layer}/{id}")]
+pub async fn remove_annotation(
+    data: web::Data<AppState>,
+    path: web::Path<(String, u64)>,
+) -> impl Responder {
+    let (layer, annotation) = path.into_inner();
+    let mut session = data.session.write().await;
+    let Some(set) = session.annotations_mut(&layer) else {
+        return HttpResponse::NotFound().body(format!("no annotation layer {layer}"));
+    };
+    if set.remove(annotation) {
+        HttpResponse::Ok().json(serde_json::json!({ "removed": annotation }))
+    } else {
+        HttpResponse::NotFound().body(format!("no annotation {annotation}"))
+    }
+}
+
+/// Handle POST /api/annotations/{layer}/renest — rebuild the hierarchy from
+/// where the shapes now are.
+#[post("/api/annotations/{layer}/renest")]
+pub async fn renest_annotations(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let id = path.into_inner();
+    let mut session = data.session.write().await;
+    match session.annotations_mut(&id) {
+        Some(set) => {
+            set.renest();
+            HttpResponse::Ok().json(set.items())
+        }
+        None => HttpResponse::NotFound().body(format!("no annotation layer {id}")),
+    }
+}
+
+/// Handle POST /api/annotations/{layer}/{id}/detach — make it top-level.
+#[post("/api/annotations/{layer}/{id}/detach")]
+pub async fn detach_annotation(
+    data: web::Data<AppState>,
+    path: web::Path<(String, u64)>,
+) -> impl Responder {
+    let (layer, annotation) = path.into_inner();
+    let mut session = data.session.write().await;
+    let Some(set) = session.annotations_mut(&layer) else {
+        return HttpResponse::NotFound().body(format!("no annotation layer {layer}"));
+    };
+    // Detaching something already top-level is not an error: the caller asked
+    // for it to have no parent, and it has none. Either way the answer is the
+    // layer as it now stands.
+    set.detach(annotation);
+    HttpResponse::Ok().json(set.items())
+}
+
+/// Body of POST /api/annotations/{layer}/save.
+#[derive(Deserialize)]
+pub struct SaveAnnotations {
+    /// `<store>.zarr/tables/<name>`, or absent to rewrite where this layer was
+    /// read from or last saved.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// World pixels to file units, `z,y,x`. Absent takes the reference image's
+    /// own `coordinateTransformations` scale — see [`roi_table::world_scale`].
+    #[serde(default)]
+    pub voxel: Option<[f64; 3]>,
+    /// Seconds per frame, for `t_second`. Absent takes the same source.
+    #[serde(default)]
+    pub seconds: Option<f64>,
+}
+
+/// Handle POST /api/annotations/{layer}/save — write the layer out.
+///
+/// **Which format is decided by the target's shape**, the same way opening one
+/// is: `<store>/annotations/<name>` or a `.geojson` path writes GeoJSON, and
+/// `<store>/tables/<name>` writes an ngio ROI table. The two are not
+/// interchangeable — a table holds axis-aligned boxes and nothing else — so a
+/// save that would flatten a polygon says how many it flattened rather than
+/// doing it quietly.
+///
+/// A remote target needs `--allow-remote-writes`. Credentials handed to a viewer
+/// so it can *read* a bucket must not silently become write access to it: the
+/// operator who configured the profile said "show me this", not "change this",
+/// and only they can say otherwise.
+#[post("/api/annotations/{layer}/save")]
+pub async fn save_annotations(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    body: web::Json<SaveAnnotations>,
+) -> impl Responder {
+    let layer = path.into_inner();
+    let body = body.into_inner();
+
+    let (rows, target) = {
+        let session = data.session.read().await;
+        let Some(set) = session.get(&layer).and_then(|l| l.data.annotations()) else {
+            return HttpResponse::NotFound().body(format!("no annotation layer {layer}"));
+        };
+        let target = body
+            .target
+            .clone()
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| set.target().map(str::to_string));
+        (set.items().to_vec(), target)
+    };
+    let Some(target) = target else {
+        return HttpResponse::BadRequest().body(
+            "no target: say where to write, as <store>.zarr/annotations/<name>, \
+             a .geojson path, or <store>.zarr/tables/<name> for an ROI table",
+        );
+    };
+    let remote = roi_table::is_remote(&target);
+    if remote && !data.allow_remote_writes {
+        return HttpResponse::Forbidden().body(
+            "this server will not write to a remote store; start it with --allow-remote-writes",
+        );
+    }
+
+    // GeoJSON first: it is the lossless form, and the ROI table is the one that
+    // has to be asked for by naming a `tables/` path.
+    let is_geojson = geojson::is_annotation_target(&target)
+        || target.trim_end().ends_with(".geojson")
+        || target.trim_end().ends_with(".json");
+    if is_geojson {
+        let written = if geojson::is_annotation_target(&target) {
+            if remote {
+                match geojson::split_uri_target(&target) {
+                    Ok((store, name)) => {
+                        geojson::save_async(&data.registry, &store, &name, &rows).await
+                    }
+                    Err(e) => return HttpResponse::BadRequest().body(format!("Error: {e:#}")),
+                }
+            } else {
+                match geojson::split_target(&target) {
+                    Ok((root, name)) => geojson::save(&root, &name, &rows),
+                    Err(e) => return HttpResponse::BadRequest().body(format!("Error: {e:#}")),
+                }
+            }
+        } else if remote {
+            // A bare `.geojson` path is a *file*, and a bucket has no files —
+            // only objects inside a store. Naming the set is what makes it
+            // addressable, so the error says how.
+            return HttpResponse::BadRequest().body(
+                "a remote target must name an annotation set, as \
+                 <store>.zarr/annotations/<name>",
+            );
+        } else {
+            let path = std::path::PathBuf::from(target.trim_start_matches("file://"));
+            geojson::save_file(&path, &rows).map(|()| path.display().to_string())
+        };
+        return match written {
+            Ok(written) => {
+                log::info!("wrote {} annotation(s) to {written}", rows.len());
+                let mut session = data.session.write().await;
+                if let Some(set) = session.annotations_mut(&layer) {
+                    set.set_target(written.clone());
+                }
+                HttpResponse::Ok().json(serde_json::json!({
+                    "target": written,
+                    "rows": rows.len(),
+                    "format": "geojson",
+                    "flattened": 0,
+                }))
+            }
+            Err(e) => {
+                log::error!("saving annotations to {target}: {e:#}");
+                HttpResponse::InternalServerError().body(format!("Error: {e:#}"))
+            }
+        };
+    }
+
+    let scale = {
+        let session = data.session.read().await;
+        let mut scale = session
+            .reference_dataset()
+            .map(roi_table::world_scale_of)
+            .unwrap_or_default();
+        if let Some(voxel) = body.voxel {
+            scale.voxel = voxel;
+        }
+        if let Some(seconds) = body.seconds.filter(|s| *s > 0.0) {
+            scale.seconds = seconds;
+        }
+        scale
+    };
+
+    let written = if remote {
+        let (store, name) = match roi_table::split_uri_target(&target) {
+            Ok(split) => split,
+            Err(e) => return HttpResponse::BadRequest().body(format!("Error: {e:#}")),
+        };
+        roi_table::write_async(&data.registry, &store, &name, &rows, scale).await
+    } else {
+        match roi_table::split_target(&target) {
+            Ok((root, name)) => roi_table::write(&root, &name, &rows, scale),
+            Err(e) => return HttpResponse::BadRequest().body(format!("Error: {e:#}")),
+        }
+    };
+    let written = match written {
+        Ok(written) => written,
+        Err(e) => {
+            log::error!("saving annotations to {target}: {e:#}");
+            return HttpResponse::InternalServerError().body(format!("Error: {e:#}"));
+        }
+    };
+    // How many shapes an ROI table could not hold, so the client can say so
+    // rather than letting the user find out on the round trip.
+    let flattened = roi_table::lossy_rows(&rows);
+    log::info!(
+        "wrote {} annotation(s) to {written}, {flattened} as bounding boxes",
+        rows.len()
+    );
+
+    let mut session = data.session.write().await;
+    if let Some(set) = session.annotations_mut(&layer) {
+        set.set_target(written.clone());
+    }
+    HttpResponse::Ok().json(serde_json::json!({
+        "target": written,
+        "rows": rows.len(),
+        "format": "roi_table",
+        "flattened": flattened,
+        "voxel": scale.voxel,
+        "seconds": scale.seconds,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Table layers
+//
+// A feature or condition table has no geometry, so it is read rather than
+// drawn — and where it names a label image, one of its columns can colour that
+// image's ids.
+// ---------------------------------------------------------------------------
+
+/// Query parameters for /api/tables/{layer}/rows.
+#[derive(Deserialize)]
+pub struct TableRowsQuery {
+    #[serde(default)]
+    offset: usize,
+    #[serde(default = "default_page")]
+    limit: usize,
+}
+
+fn default_page() -> usize {
+    200
+}
+
+/// Handle GET /api/tables/{layer}/rows — a page of a table, as text.
+///
+/// Paged because a feature table has a row per segmented object, and a hundred
+/// thousand of them is not something to push through a session read.
+#[get("/api/tables/{layer}/rows")]
+pub async fn table_rows(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<TableRowsQuery>,
+) -> impl Responder {
+    let id = path.into_inner();
+    let q = query.into_inner();
+    let session = data.session.read().await;
+    let Some(table) = session.table(&id) else {
+        return HttpResponse::NotFound().body(format!("no table layer {id}"));
+    };
+    let names: Vec<String> = table
+        .columns
+        .names()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    let total = table.columns.row_count();
+    let end = (q.offset + q.limit.min(5000)).min(total);
+    let rows: Vec<Vec<String>> = (q.offset.min(total)..end)
+        .map(|row| {
+            names
+                .iter()
+                .map(|name| table.columns.string(name, row).unwrap_or_default())
+                .collect()
+        })
+        .collect();
+    HttpResponse::Ok().json(serde_json::json!({
+        "columns": names,
+        "offset": q.offset,
+        "total": total,
+        "rows": rows,
+    }))
+}
+
+/// Query parameters for /api/tables/{layer}/column.
+#[derive(Deserialize)]
+pub struct TableColumnQuery {
+    name: String,
+}
+
+/// Handle GET /api/tables/{layer}/column — one column paired with label ids.
+///
+/// This is the join a feature table exists for: the ids come from the table's
+/// `instance_key`, the values from the named column, and together they colour a
+/// label image by a measurement.
+#[get("/api/tables/{layer}/column")]
+pub async fn table_column(
+    data: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<TableColumnQuery>,
+) -> impl Responder {
+    let id = path.into_inner();
+    let name = query.into_inner().name;
+    let session = data.session.read().await;
+    let Some(table) = session.table(&id) else {
+        return HttpResponse::NotFound().body(format!("no table layer {id}"));
+    };
+    match table.column_by_label(&name) {
+        Some((labels, values)) => HttpResponse::Ok().json(serde_json::json!({
+            "column": name,
+            "labels": labels,
+            "values": values,
+        })),
+        None => HttpResponse::BadRequest()
+            .body(format!("`{name}` is not a numeric column of this table")),
+    }
+}
+
+/// Query parameters for /api/annotations/tables.
+#[derive(Deserialize)]
+pub struct TablesQuery {
+    /// A store to look inside. Absent uses the reference layer's source.
+    #[serde(default)]
+    store: Option<String>,
+}
+
+/// Handle GET /api/annotations/tables — the ROI tables a store already holds.
+///
+/// This is what turns "open an annotation layer" from a path the user must
+/// remember into a list they can pick from. A store with no `tables` group is
+/// not an error — it is the normal case — so this answers with an empty list
+/// rather than a status the client would have to special-case.
+#[get("/api/annotations/tables")]
+pub async fn list_tables(
+    data: web::Data<AppState>,
+    query: web::Query<TablesQuery>,
+) -> impl Responder {
+    let store = match query.into_inner().store.filter(|s| !s.trim().is_empty()) {
+        Some(store) => store,
+        None => {
+            let session = data.session.read().await;
+            match session.default_layer().map(|layer| layer.spec.uri()) {
+                Some(uri) => uri,
+                None => {
+                    return HttpResponse::Ok()
+                        .json(serde_json::json!({"store": null, "tables": []}))
+                }
+            }
+        }
+    };
+
+    let (tables, sets, shown, error) = if roi_table::is_remote(&store) {
+        let tables = roi_table::list_async(&data.registry, &store).await;
+        let sets = geojson::list_async(&data.registry, &store).await;
+        let error = tables
+            .as_ref()
+            .err()
+            .or(sets.as_ref().err())
+            .map(|e| format!("{e:#}"));
+        (
+            tables.unwrap_or_default(),
+            sets.unwrap_or_default(),
+            store.clone(),
+            error,
+        )
+    } else {
+        let root = std::path::PathBuf::from(store.trim_start_matches("file://"));
+        let shown = root.display().to_string();
+        let tables = roi_table::list(&root);
+        let sets = geojson::list(&root);
+        let error = tables
+            .as_ref()
+            .err()
+            .or(sets.as_ref().err())
+            .map(|e| format!("{e:#}"));
+        (
+            tables.unwrap_or_default(),
+            sets.unwrap_or_default(),
+            shown,
+            error,
+        )
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "store": shown,
+        "tables": tables,
+        "annotations": sets,
+        "writable": !roi_table::is_remote(&shown) || data.allow_remote_writes,
+        "error": error,
+    }))
 }

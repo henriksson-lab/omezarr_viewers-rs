@@ -12,7 +12,16 @@
 use anyhow::{Context, Result};
 use omezarr_viewer_common::{ArrayInfo, DatasetInfo, DatasetMetadata, Multiscale, OmeroMetadata};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Take a cache lock, poisoned or not.
+///
+/// The map behind it is a *cache* of opened arrays: a thread that panicked
+/// while holding it left a map that is still perfectly usable, and propagating
+/// the poison would turn one panicking request into every later one failing.
+fn lock<T>(cache: &Mutex<T>) -> MutexGuard<'_, T> {
+    cache.lock().unwrap_or_else(|e| e.into_inner())
+}
 use zarrs::array::Array;
 use zarrs::array_subset::ArraySubset;
 use zarrs::filesystem::FilesystemStore;
@@ -479,7 +488,7 @@ impl ZarrStore {
 
         match &self.backend {
             StoreBackend::Local { store, arrays } => {
-                let cached = arrays.lock().unwrap().get(&level).cloned();
+                let cached = lock(arrays).get(&level).cloned();
                 let array = match cached {
                     Some(array) => array,
                     None => {
@@ -487,7 +496,7 @@ impl ZarrStore {
                             Array::open(store.clone(), &array_path)
                                 .with_context(|| format!("Failed to open array at {array_path}"))?,
                         );
-                        arrays.lock().unwrap().insert(level, array.clone());
+                        lock(arrays).insert(level, array.clone());
                         array
                     }
                 };
@@ -500,7 +509,7 @@ impl ZarrStore {
                     .map(|b| b.to_vec())
             }
             StoreBackend::Async { store, arrays } => {
-                let cached = arrays.lock().unwrap().get(&level).cloned();
+                let cached = lock(arrays).get(&level).cloned();
                 let array = match cached {
                     Some(array) => array,
                     None => {
@@ -509,7 +518,7 @@ impl ZarrStore {
                                 .await
                                 .with_context(|| format!("Failed to open array at {array_path}"))?,
                         );
-                        arrays.lock().unwrap().insert(level, array.clone());
+                        lock(arrays).insert(level, array.clone());
                         array
                     }
                 };
