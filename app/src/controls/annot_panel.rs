@@ -4,8 +4,11 @@
 use omezarr_viewer_common::{in_tree_order, Annotation, Geometry, ObjectType};
 use yew::prelude::*;
 
+use crate::layers::LayerStyle;
+
 use crate::controls::channel_panel::color_to_hex;
 use crate::controls::layer_header::LayerHeader;
+use crate::controls::slider_row::SliderRow;
 
 /// Props for an annotation layer's controls.
 #[derive(Properties, PartialEq)]
@@ -15,12 +18,10 @@ pub struct AnnotPanelProps {
     /// Every annotation in the layer, filtered or not — the list says which are
     /// hidden rather than hiding them from the list too.
     pub annotations: Vec<Annotation>,
-    pub color: [f32; 3],
+    /// How the layer is drawn.
+    pub style: LayerStyle,
     pub color_by_class: bool,
     pub filled: bool,
-    pub opacity: f32,
-    pub size: f32,
-    pub slab: f32,
     pub selected: Option<u64>,
     /// The class the next mark drawn into this layer gets.
     pub class: String,
@@ -107,19 +108,19 @@ fn checkbox(cb: Callback<bool>) -> Callback<Event> {
     })
 }
 
-fn slider(cb: Callback<f32>) -> Callback<InputEvent> {
-    Callback::from(move |e: InputEvent| {
-        let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-        if let Ok(value) = input.value().parse::<f32>() {
+/// `SliderRow` hands back the input's text, because the number behind it is a
+/// different type in every panel; these two turn it back into ours.
+fn slider(cb: Callback<f32>) -> Callback<String> {
+    Callback::from(move |text: String| {
+        if let Ok(value) = text.parse::<f32>() {
             cb.emit(value);
         }
     })
 }
 
-fn slider64(cb: Callback<f64>) -> Callback<InputEvent> {
-    Callback::from(move |e: InputEvent| {
-        let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-        if let Ok(value) = input.value().parse::<f64>() {
+fn slider64(cb: Callback<f64>) -> Callback<String> {
+    Callback::from(move |text: String| {
+        if let Ok(value) = text.parse::<f64>() {
             cb.emit(value);
         }
     })
@@ -182,7 +183,7 @@ fn layer_section(props: &AnnotPanelProps) -> Html {
             name={props.name.clone()}
             visible={Some(props.visible)}
             on_visibility={props.on_visibility.clone()}
-            color={Some(props.color)}
+            color={Some(props.style.color)}
             on_color={props.on_color.clone()}
             dirty={props.dirty}
             on_remove={props.on_remove.clone()}
@@ -247,26 +248,16 @@ fn layer_section(props: &AnnotPanelProps) -> Html {
                 })}
             </div>
         }
-        <div class="slider-row">
-            <span>{"Size"}</span>
-            <input type="range" min="2" max="40" step="1"
-                value={props.size.to_string()} oninput={slider(props.on_size.clone())} />
-            <span class="slider-value">{format!("{:.0}px", props.size)}</span>
-        </div>
-        <div class="slider-row">
-            <span>{"Opacity"}</span>
-            <input type="range" min="0" max="1" step="0.01"
-                value={props.opacity.to_string()} oninput={slider(props.on_opacity.clone())} />
-            <span class="slider-value">{format!("{:.2}", props.opacity)}</span>
-        </div>
-        <div class="slider-row">
-            <span>{"Z slab"}</span>
-            <input type="range" min="0" max="64" step="1"
-                value={props.slab.to_string()} oninput={slider(props.on_slab.clone())} />
-            <span class="slider-value">
-                { if props.slab > 0.0 { format!("\u{00b1}{:.0}", props.slab) } else { "all z".to_string() } }
-            </span>
-        </div>
+        <SliderRow label="Size" min="2" max="40" step="1"
+            value={props.style.size.to_string()} display={format!("{:.0}px", props.style.size)}
+            on_input={slider(props.on_size.clone())} />
+        <SliderRow label="Opacity" min="0" max="1" step="0.01"
+            value={props.style.opacity.to_string()} display={format!("{:.2}", props.style.opacity)}
+            on_input={slider(props.on_opacity.clone())} />
+        <SliderRow label="Z slab" min="0" max="64" step="1"
+            value={props.style.slab.to_string()}
+            display={if props.style.slab > 0.0 { format!("\u{00b1}{:.0}", props.style.slab) } else { "all z".to_string() }}
+            on_input={slider(props.on_slab.clone())} />
         </>
     }
 }
@@ -307,23 +298,15 @@ fn selected_section(props: &AnnotPanelProps, selected: Option<&Annotation>) -> H
                     {" Locked"}
                 </label>
             </div>
-            <div class="slider-row">
-                <span>{"Depth"}</span>
-                <input type="range" min="0" max="64" step="1"
-                    value={item.z_extent.to_string()}
-                    oninput={slider64(props.on_z_extent.clone())} />
-                <span class="slider-value">{format!("{} z", item.z_extent + 1)}</span>
-            </div>
+            <SliderRow label="Depth" min="0" max="64" step="1"
+                value={item.z_extent.to_string()}
+                display={format!("{} z", item.z_extent + 1)}
+                on_input={slider64(props.on_z_extent.clone())} />
             if props.has_t {
-                <div class="slider-row">
-                    <span>{"Frames"}</span>
-                    <input type="range" min="0" max="64" step="1"
-                        value={item.t_extent.to_string()}
-                        oninput={slider64(props.on_t_extent.clone())} />
-                    <span class="slider-value">
-                        {format!("t {}\u{2013}{}", item.plane.t, item.plane.t + item.t_extent as i32)}
-                    </span>
-                </div>
+                <SliderRow label="Frames" min="0" max="64" step="1"
+                    value={item.t_extent.to_string()}
+                    display={format!("t {}\u{2013}{}", item.plane.t, item.plane.t + item.t_extent as i32)}
+                    on_input={slider64(props.on_t_extent.clone())} />
             }
         }
         </>

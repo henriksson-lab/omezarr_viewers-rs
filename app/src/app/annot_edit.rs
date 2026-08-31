@@ -98,18 +98,7 @@ impl App {
                 let before = item.clone();
                 item.label = class;
                 let updated = item.clone();
-                state.dirty = true;
-                self.remember(Undo::Restore {
-                    layer: layer.clone(),
-                    annotation: Box::new(before),
-                    deleted: false,
-                });
-                self.rebuild_annotations(index);
-                spawn_local(async move {
-                    if let Err(e) = api_client::update_annotation(&layer, &updated).await {
-                        log::warn!("rename annotation: {e}");
-                    }
-                });
+                self.store_edit(ctx, index, layer, before, updated, "rename annotation");
                 true
             }
             AnnotEditMsg::Delete(index, id) => {

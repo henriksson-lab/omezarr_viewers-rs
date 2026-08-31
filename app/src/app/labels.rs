@@ -149,7 +149,7 @@ impl App {
             };
             // The slack is in world pixels but the mark is drawn in screen
             // pixels, so what looks like a hit depends on the zoom.
-            let pad = (state.size / self.zoom().max(0.01)).clamp(2.0, 512.0) as f64;
+            let pad = (state.style.size / self.zoom().max(0.01)).clamp(2.0, 512.0) as f64;
             // Only what is actually drawn right now can be picked, or a click
             // would select a shape on another plane that nothing shows.
             let (z, t) = (self.z_slice as i32, self.t_index as i32);

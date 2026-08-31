@@ -75,25 +75,25 @@ impl App {
             }
             AnnotStyleMsg::Color(index, color) => {
                 if let Some(state) = self.annot_mut(index) {
-                    state.color = color;
+                    state.style.color = color;
                 }
                 true
             }
             AnnotStyleMsg::Opacity(index, value) => {
                 if let Some(state) = self.annot_mut(index) {
-                    state.opacity = value;
+                    state.style.opacity = value;
                 }
                 true
             }
             AnnotStyleMsg::Size(index, value) => {
                 if let Some(state) = self.annot_mut(index) {
-                    state.size = value;
+                    state.style.size = value;
                 }
                 true
             }
             AnnotStyleMsg::Slab(index, value) => {
                 if let Some(state) = self.annot_mut(index) {
-                    state.slab = value;
+                    state.style.slab = value;
                 }
                 true
             }

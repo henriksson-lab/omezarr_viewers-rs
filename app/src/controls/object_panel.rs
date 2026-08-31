@@ -1,7 +1,10 @@
 use omezarr_viewer_common::{ObjectColumn, ObjectSchema};
 use yew::prelude::*;
 
+use crate::layers::LayerStyle;
+
 use crate::controls::layer_header::LayerHeader;
+use crate::controls::slider_row::SliderRow;
 
 /// Props for an object layer's controls.
 #[derive(Properties, PartialEq)]
@@ -10,13 +13,11 @@ pub struct ObjectPanelProps {
     pub visible: bool,
     pub schema: ObjectSchema,
     pub count: u64,
-    pub color: [f32; 3],
-    pub opacity: f32,
-    pub size: f32,
+    /// How the layer is drawn.
+    pub style: LayerStyle,
     pub hollow: bool,
     pub color_by: Option<usize>,
     pub filters: Vec<Option<(f32, f32)>>,
-    pub slab: f32,
     /// Rows loaded, rows drawn after filtering, rows that matched on the server.
     pub loaded: usize,
     pub shown: usize,
@@ -38,10 +39,10 @@ pub struct ObjectPanelProps {
 /// Controls for one object layer: how the points look, and which ones show.
 #[function_component(ObjectPanel)]
 pub fn object_panel(props: &ObjectPanelProps) -> Html {
+    // `SliderRow` hands back the input's text; the number behind it is ours.
     let slider = |cb: Callback<f32>| {
-        Callback::from(move |e: InputEvent| {
-            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-            if let Ok(value) = input.value().parse::<f32>() {
+        Callback::from(move |text: String| {
+            if let Ok(value) = text.parse::<f32>() {
                 cb.emit(value);
             }
         })
@@ -67,30 +68,22 @@ pub fn object_panel(props: &ObjectPanelProps) -> Html {
                 name={props.name.clone()}
                 visible={Some(props.visible)}
                 on_visibility={props.on_visibility.clone()}
-                color={Some(props.color)}
+                color={Some(props.style.color)}
                 on_color={props.on_color.clone()}
                 on_remove={props.on_remove.clone()}
             />
 
-            <div class="slider-row">
-                <span>{"Size"}</span>
-                <input type="range" min="2" max="40" step="1"
-                    value={props.size.to_string()} oninput={slider(props.on_size.clone())} />
-                <span class="slider-value">{format!("{:.0}px", props.size)}</span>
-            </div>
-            <div class="slider-row">
-                <span>{"Opacity"}</span>
-                <input type="range" min="0" max="1" step="0.01"
-                    value={props.opacity.to_string()} oninput={slider(props.on_opacity.clone())} />
-                <span class="slider-value">{format!("{:.2}", props.opacity)}</span>
-            </div>
+            <SliderRow label="Size" min="2" max="40" step="1"
+                value={props.style.size.to_string()} display={format!("{:.0}px", props.style.size)}
+                on_input={slider(props.on_size.clone())} />
+            <SliderRow label="Opacity" min="0" max="1" step="0.01"
+                value={props.style.opacity.to_string()} display={format!("{:.2}", props.style.opacity)}
+                on_input={slider(props.on_opacity.clone())} />
             if props.schema.has_z {
-                <div class="slider-row">
-                    <span>{"Z slab"}</span>
-                    <input type="range" min="0" max="64" step="1"
-                        value={props.slab.to_string()} oninput={slider(props.on_slab.clone())} />
-                    <span class="slider-value">{format!("\u{00b1}{:.0}", props.slab)}</span>
-                </div>
+                <SliderRow label="Z slab" min="0" max="64" step="1"
+                    value={props.style.slab.to_string()}
+                    display={format!("\u{00b1}{:.0}", props.style.slab)}
+                    on_input={slider(props.on_slab.clone())} />
             }
             <div class="slider-row">
                 <label>

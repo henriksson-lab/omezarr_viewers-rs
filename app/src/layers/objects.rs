@@ -2,24 +2,21 @@
 
 use omezarr_viewer_common::ObjectSchema;
 
+use super::LayerStyle;
+
 /// UI state for an object layer.
 #[derive(Clone, PartialEq)]
 pub struct ObjectUiState {
     pub schema: ObjectSchema,
     pub count: u64,
-    pub color: [f32; 3],
-    pub opacity: f32,
-    /// Sprite diameter in screen pixels.
-    pub size: f32,
+    /// How it is drawn.
+    pub style: LayerStyle,
     /// Rings rather than discs, so the pixels underneath stay visible.
     pub hollow: bool,
     /// Which column colours the points, if any.
     pub color_by: Option<usize>,
     /// Per-column `(min, max)` filter, when one is set.
     pub filters: Vec<Option<(f32, f32)>>,
-    /// How far from the current z a point may be before it fades out. Zero for
-    /// a set with no z, which is every 2D detector's.
-    pub slab: f32,
     /// The row the last click selected.
     pub selected_row: Option<u32>,
     /// What the last fetch returned, and how much matched before the cap.
@@ -36,13 +33,15 @@ impl ObjectUiState {
         Self {
             schema,
             count,
-            color: [1.0, 0.85, 0.2],
-            opacity: 0.9,
-            size: 9.0,
+            style: LayerStyle {
+                color: [1.0, 0.85, 0.2],
+                opacity: 0.9,
+                size: 9.0,
+                slab,
+            },
             hollow: false,
             color_by: None,
             filters,
-            slab,
             selected_row: None,
             loaded: 0,
             total: 0,

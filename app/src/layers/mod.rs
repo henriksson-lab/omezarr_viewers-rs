@@ -22,6 +22,25 @@ mod objects;
 pub use annotations::AnnotUiState;
 pub use objects::{ObjectData, ObjectUiState};
 
+/// How a layer is drawn.
+///
+/// The four settings every drawable layer kind has, named once instead of four
+/// times: they were declared on `AnnotUiState`, on `ObjectUiState`, and again on
+/// each panel's props, so adding one meant finding all four.
+///
+/// Small and `Copy` on purpose. It is passed to the panels as a prop, and a
+/// prop is cloned and compared on every render — which is why the *state*
+/// structs cannot be passed wholesale: they carry the rows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LayerStyle {
+    pub color: [f32; 3],
+    pub opacity: f32,
+    /// Point or vertex diameter, in screen pixels.
+    pub size: f32,
+    /// How far outside its own z a shape may be before it fades.
+    pub slab: f32,
+}
+
 /// UI state for a single channel: visibility, color, contrast, and opacity.
 #[derive(Clone, PartialEq)]
 pub struct ChannelUiState {

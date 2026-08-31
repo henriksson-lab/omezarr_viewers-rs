@@ -1,6 +1,7 @@
 use yew::prelude::*;
 
 use crate::controls::layer_header::LayerHeader;
+use crate::controls::slider_row::SliderRow;
 
 /// Props for a label layer's controls.
 #[derive(Properties, PartialEq)]
@@ -24,11 +25,11 @@ pub struct LabelPanelProps {
 /// Controls for one label layer: opacity, outline mode, and what is selected.
 #[function_component(LabelPanel)]
 pub fn label_panel(props: &LabelPanelProps) -> Html {
+    // `SliderRow` hands back the input's text; the number behind it is ours.
     let on_opacity = {
         let cb = props.on_opacity.clone();
-        Callback::from(move |e: InputEvent| {
-            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
-            if let Ok(v) = input.value().parse::<f32>() {
+        Callback::from(move |text: String| {
+            if let Ok(v) = text.parse::<f32>() {
                 cb.emit(v);
             }
         })
@@ -60,12 +61,9 @@ pub fn label_panel(props: &LabelPanelProps) -> Html {
                 on_visibility={props.on_visibility.clone()}
                 on_remove={props.on_remove.clone()}
             />
-            <div class="slider-row">
-                <span>{"Opacity"}</span>
-                <input type="range" min="0" max="1" step="0.01"
-                    value={props.opacity.to_string()} oninput={on_opacity} />
-                <span class="slider-value">{format!("{:.2}", props.opacity)}</span>
-            </div>
+            <SliderRow label="Opacity" min="0" max="1" step="0.01"
+                value={props.opacity.to_string()} display={format!("{:.2}", props.opacity)}
+                on_input={on_opacity} />
             <div class="slider-row">
                 <label>
                     <input type="checkbox" checked={props.outline} onchange={on_outline} />

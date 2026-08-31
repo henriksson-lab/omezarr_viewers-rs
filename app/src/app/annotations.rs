@@ -171,7 +171,31 @@ impl App {
         if updated == before {
             return;
         }
-        state.dirty = true;
+        self.store_edit(ctx, index, layer, before, updated, "set extent");
+    }
+
+    /// Record one changed annotation and send it.
+    ///
+    /// The four things an annotation write has to do together: mark the layer
+    /// dirty so the save button knows there is work, push the inverse so the
+    /// change can be undone, rebuild the buffers so the picture matches the
+    /// list, and PUT the row. Written once because a site that did three of the
+    /// four would be a silent bug — a change that cannot be undone, or one the
+    /// save button never hears about.
+    ///
+    /// `what` names the operation in the failure log and nothing else.
+    pub(super) fn store_edit(
+        &mut self,
+        ctx: &Context<Self>,
+        index: usize,
+        layer: String,
+        before: Annotation,
+        updated: Annotation,
+        what: &'static str,
+    ) {
+        if let Some(state) = self.annot_mut(index) {
+            state.dirty = true;
+        }
         self.remember(Undo::Restore {
             layer: layer.clone(),
             annotation: Box::new(before),
@@ -182,7 +206,7 @@ impl App {
         spawn_local(async move {
             match api_client::update_annotation(&layer, &updated).await {
                 Ok(stored) => link.send_message(AnnotMsg::Updated(layer, Box::new(stored))),
-                Err(e) => log::warn!("set extent: {e}"),
+                Err(e) => log::warn!("{what}: {e}"),
             }
         });
     }
@@ -389,20 +413,7 @@ impl App {
         if updated == before {
             return false;
         }
-        state.dirty = true;
-        self.remember(Undo::Restore {
-            layer: layer.clone(),
-            annotation: Box::new(before),
-            deleted: false,
-        });
-        self.rebuild_annotations(index);
-        let link = ctx.link().clone();
-        spawn_local(async move {
-            match api_client::update_annotation(&layer, &updated).await {
-                Ok(stored) => link.send_message(AnnotMsg::Updated(layer, Box::new(stored))),
-                Err(e) => log::warn!("edit annotation: {e}"),
-            }
-        });
+        self.store_edit(ctx, index, layer, before, updated, "edit annotation");
         true
     }
 }

@@ -39,19 +39,19 @@ impl App {
         match msg {
             ObjectMsg::Color(layer, color) => {
                 if let Some(state) = self.object_mut(layer) {
-                    state.color = color;
+                    state.style.color = color;
                 }
                 true
             }
             ObjectMsg::Opacity(layer, value) => {
                 if let Some(state) = self.object_mut(layer) {
-                    state.opacity = value;
+                    state.style.opacity = value;
                 }
                 true
             }
             ObjectMsg::Size(layer, value) => {
                 if let Some(state) = self.object_mut(layer) {
-                    state.size = value;
+                    state.style.size = value;
                 }
                 true
             }
@@ -81,7 +81,7 @@ impl App {
             }
             ObjectMsg::Slab(layer, value) => {
                 if let Some(state) = self.object_mut(layer) {
-                    state.slab = value;
+                    state.style.slab = value;
                 }
                 self.load_tiles(ctx);
                 true
@@ -200,8 +200,8 @@ impl App {
         const MAX_OBJECTS: usize = 200_000;
 
         let z = self.z_slice as f32;
-        let (z0, z1) = if state.schema.has_z && state.slab > 0.0 {
-            (z - state.slab, z + state.slab)
+        let (z0, z1) = if state.schema.has_z && state.style.slab > 0.0 {
+            (z - state.style.slab, z + state.style.slab)
         } else {
             (f32::NEG_INFINITY, f32::INFINITY)
         };

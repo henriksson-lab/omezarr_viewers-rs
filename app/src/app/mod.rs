@@ -437,40 +437,40 @@ impl App {
                     },
                     LayerUi::Annotations(state) => LayerRenderKind::Annotations {
                         points: PointRenderInfo {
-                            color: state.color,
-                            opacity: state.opacity,
-                            size: state.size,
+                            color: state.style.color,
+                            opacity: state.style.opacity,
+                            size: state.style.size,
                             color_by_value: false,
                             value_range: [0.0, 1.0],
                             // Rings, so a point marks a spot without hiding it.
                             hollow: true,
                             z: self.z_slice as f32,
-                            slab: state.slab,
+                            slab: state.style.slab,
                             // The point shader matches on the `row` attribute,
                             // which carries the annotation id.
                             selected_row: state.selected.map(|id| id as f32).unwrap_or(-1.0),
                         },
                         lines: LineRenderInfo {
-                            color: state.color,
-                            opacity: state.opacity,
+                            color: state.style.color,
+                            opacity: state.style.opacity,
                             z: self.z_slice as f32,
-                            slab: state.slab,
+                            slab: state.style.slab,
                         },
                         fills: FillRenderInfo {
-                            color: state.color,
+                            color: state.style.color,
                             // A fill is translucent whatever the outline's
                             // opacity: it covers the pixels the shape was drawn
                             // around, and QuPath's fill is see-through for the
                             // same reason.
-                            opacity: state.opacity * 0.3,
+                            opacity: state.style.opacity * 0.3,
                             z: self.z_slice as f32,
-                            slab: state.slab,
+                            slab: state.style.slab,
                         },
                     },
                     LayerUi::Objects(state) => LayerRenderKind::Objects(PointRenderInfo {
-                        color: state.color,
-                        opacity: state.opacity,
-                        size: state.size,
+                        color: state.style.color,
+                        opacity: state.style.opacity,
+                        size: state.style.size,
                         color_by_value: state.color_by.is_some(),
                         value_range: state
                             .color_by
@@ -480,7 +480,7 @@ impl App {
                             .unwrap_or([0.0, 1.0]),
                         hollow: state.hollow,
                         z: self.z_slice as f32,
-                        slab: state.slab,
+                        slab: state.style.slab,
                         selected_row: state.selected_row.map(|row| row as f32).unwrap_or(-1.0),
                     }),
                 },

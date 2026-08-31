@@ -6,6 +6,8 @@
 
 use omezarr_viewer_common::{Annotation, Geometry, ObjectType};
 
+use super::LayerStyle;
+
 /// UI state for an annotation layer — the one kind the viewer writes.
 ///
 /// The rows themselves live here rather than in a separate map, unlike an
@@ -17,18 +19,14 @@ pub struct AnnotUiState {
     pub annotations: Vec<Annotation>,
     /// Where a save with no explicit target would write.
     pub target: Option<String>,
-    pub color: [f32; 3],
+    /// How it is drawn.
+    pub style: LayerStyle,
     /// Colour each shape by its class instead of by `color`.
     pub color_by_class: bool,
     /// Fill regions as well as outlining them, as QuPath's "Fill annotations"
     /// does. Off by default, which is QuPath's default too: a fill hides the
     /// pixels the shape was drawn around.
     pub filled: bool,
-    pub opacity: f32,
-    /// Point sprite diameter, screen pixels.
-    pub size: f32,
-    /// How far outside a shape's own z span the viewer may be before it fades.
-    pub slab: f32,
     /// The annotation the last click selected.
     pub selected: Option<u64>,
     /// The class the *next* shape drawn into this layer gets.
@@ -65,12 +63,14 @@ impl AnnotUiState {
             annotations,
             save_target: target.clone().unwrap_or_default(),
             target,
-            color: [0.2, 0.9, 1.0],
+            style: LayerStyle {
+                color: [0.2, 0.9, 1.0],
+                opacity: 0.95,
+                size: 11.0,
+                slab: 8.0,
+            },
             color_by_class: false,
             filled: false,
-            opacity: 0.95,
-            size: 11.0,
-            slab: 8.0,
             selected: None,
             class: String::new(),
             object_type: ObjectType::Annotation,
@@ -88,12 +88,9 @@ impl AnnotUiState {
     /// state entirely would discard whatever the server just said, and reusing
     /// none of it would reset the panel on every reload.
     pub fn keep_view_of(&mut self, old: &Self) {
-        self.color = old.color;
+        self.style = old.style;
         self.color_by_class = old.color_by_class;
         self.filled = old.filled;
-        self.opacity = old.opacity;
-        self.size = old.size;
-        self.slab = old.slab;
         self.class = old.class.clone();
         self.object_type = old.object_type;
         self.filter = old.filter.clone();
@@ -160,7 +157,7 @@ impl AnnotUiState {
     /// of their own.
     pub fn class_color(&self, class: &str) -> [f32; 3] {
         if !self.color_by_class || class.is_empty() {
-            return self.color;
+            return self.style.color;
         }
         let mut hash: u32 = 2166136261;
         for byte in class.as_bytes() {
@@ -498,7 +495,7 @@ mod tests {
         assert_eq!(first.class_color("vessel"), second.class_color("vessel"));
         assert_ne!(first.class_color("vessel"), first.class_color("cell"));
         // The unclassified take the layer's own colour, whatever it is.
-        assert_eq!(first.class_color(""), first.color);
+        assert_eq!(first.class_color(""), first.style.color);
     }
 
     #[test]

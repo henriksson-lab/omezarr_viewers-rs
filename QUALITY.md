@@ -435,3 +435,49 @@ Three things are worth keeping from how it was found:
   wrong before that (`/dev/shm`, a port collision, a missing browser), and each
   cost a CI cycle.
 
+---
+
+## 11. Third round: the write path, `SliderRow`, `LayerStyle`
+
+Re-measuring after task 9 left 36 clusters, of which three were not noise. The
+other 33 were checked individually this time rather than assumed: fixture
+construction inside `roi_table/tests.rs`, the `fortran_order` header the npy
+work deliberately left inline, and two function *signatures* sharing seven
+camera parameters.
+
+- [x] **`App::store_edit`** — the annotation write path, which was written three
+      times. Four things have to happen together (mark dirty, push the inverse
+      onto the undo stack, rebuild the buffers, PUT), and three-of-four is a
+      silent bug: a change that cannot be undone, or one the save button never
+      hears about. The third site was `Rename`, which had **discarded** the
+      server's reply where the other two applied it; unifying needed no flag, so
+      rename now applies it like everything else.
+      Four sites were left alone — `Added`, `Removed`, `delete_all` and
+      `restructure` push different `Undo` variants, call different endpoints, and
+      one deliberately does not rebuild. Folding them in would have needed three
+      switches to save four lines.
+- [x] **`SliderRow`** — 9 of the 26 rows wearing `slider-row` adopted it. The
+      other 17 wear that class because it is the panels' row layout, not because
+      they are sliders: text inputs, selects, checkboxes, buttons, a dual-range
+      filter, and `channel_panel`'s opacity, which names itself with `<label>`
+      and reads out in `.value`. Its props are **strings, not numbers**: the
+      values are `f32` in two panels and `f64` in a third, and widening an `f32`
+      to reach one numeric prop changes what lands in the DOM — `0.33f32` as an
+      `f64` prints `0.33000001311302185`.
+- [x] **`LayerStyle { color, opacity, size, slab }`** — the four settings every
+      drawable layer has, declared once instead of four times: on
+      `AnnotUiState`, on `ObjectUiState`, and again on each panel's props.
+      Deliberately *not* the tempting version: passing the state structs
+      wholesale as props would clone the annotations vector and run an O(n)
+      `PartialEq` on every render. `keep_view_of` now copies one field where it
+      copied four, which is exactly the drift this prevents.
+
+**On the cost of the third one:** it changed 57 field accesses to collapse four
+declarations. That is the thinnest ratio of anything in this file, and it was
+called out as such before it was done. What it bought is that both mirrors the
+detector had been reporting are gone, and a new visual setting is one edit.
+
+**Result:** duplication 36 -> 21 blocks of >=8 lines; 71 -> 21 across the three
+rounds. 288 Rust tests, 76 browser assertions on **both** Chrome 104 and Chrome
+152, clippy and fmt clean.
+
