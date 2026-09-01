@@ -20,6 +20,28 @@ pub enum LabelMsg {
     Picked(String, api_client::VoxelValue, (f32, f32)),
     CountRegions,
     RegionsCounted(Vec<api_client::RegionCount>),
+
+    // --- Classing the ids: a class per instance, for training a classifier.
+    /// Does a click on the image class the id it lands on?
+    Classing(usize, bool),
+    /// The class the next click assigns; empty is "nothing in particular".
+    SetClass(usize, String),
+    /// Put the layer's current class on one id.
+    Assign(usize, u64),
+    /// Forget an id — not the same as classing it as nothing.
+    Unassign(usize, u64),
+    /// One edit landed, and how many ids the *server* now holds a class for.
+    Assigned(String, usize),
+    /// An edit that did not land, in the server's own words.
+    ClassFailed(String, String),
+    /// Every class a layer holds, as the server has them.
+    ClassesLoaded(String, Box<api_client::LabelClasses>),
+    /// Paint each classed id by its class.
+    ColorByClass(usize, bool),
+    SaveTarget(usize, String),
+    SaveRegion(usize, String),
+    SaveClasses(usize),
+    ClassesSaved(String, Result<api_client::SavedClasses, String>),
 }
 
 impl From<LabelMsg> for AppMsg {
@@ -63,11 +85,21 @@ impl App {
             }
             LabelMsg::Picked(layer_id, voxel, world) => {
                 let mut layer_name = layer_id.clone();
+                let id = voxel.id.unwrap_or(0);
+                let mut classing = None;
                 if let Some(index) = self.layers.iter().position(|l| l.id == layer_id) {
                     layer_name = self.layers[index].name.clone();
                     if let Some(state) = self.label_mut(index) {
-                        state.selected = voxel.id.unwrap_or(0) as u32;
+                        state.selected = id as u32;
+                        // Id 0 is the background, not an instance: classing it
+                        // would put a row on everything nobody segmented.
+                        if state.classing && id != 0 {
+                            classing = Some(index);
+                        }
                     }
+                }
+                if let Some(index) = classing {
+                    ctx.link().send_message(LabelMsg::Assign(index, id));
                 }
                 let region = match (&voxel.name, &voxel.acronym) {
                     (Some(name), Some(acronym)) => Some(format!("{name} ({acronym})")),
@@ -115,6 +147,166 @@ impl App {
                 self.counting_regions = false;
                 true
             }
+            LabelMsg::Classing(index, on) => {
+                if let Some(state) = self.label_mut(index) {
+                    state.classing = on;
+                }
+                true
+            }
+            LabelMsg::SetClass(index, class) => {
+                if let Some(state) = self.label_mut(index) {
+                    state.class = class;
+                }
+                true
+            }
+            LabelMsg::Assign(index, id) => {
+                let Some(layer) = self.layers.get(index).map(|l| l.id.clone()) else {
+                    return false;
+                };
+                let Some(state) = self.label_mut(index) else {
+                    return false;
+                };
+                let class = state.class.clone();
+                // Shown at once and confirmed afterwards: a curator clicking
+                // through a field of nuclei cannot wait for a round trip per
+                // id, and every answer carries the server's own count so a
+                // divergence is caught rather than accumulated.
+                state.assigned.insert(id, class.clone());
+                state.status = None;
+                self.repaint_classes(index);
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    match api_client::set_label_class(&layer, id, &class).await {
+                        Ok(count) => link.send_message(LabelMsg::Assigned(layer, count.assigned)),
+                        Err(e) => link.send_message(LabelMsg::ClassFailed(layer, e)),
+                    }
+                });
+                true
+            }
+            LabelMsg::Unassign(index, id) => {
+                let Some(layer) = self.layers.get(index).map(|l| l.id.clone()) else {
+                    return false;
+                };
+                let Some(state) = self.label_mut(index) else {
+                    return false;
+                };
+                state.assigned.remove(&id);
+                state.status = None;
+                self.repaint_classes(index);
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    match api_client::clear_label_class(&layer, id).await {
+                        Ok(count) => link.send_message(LabelMsg::Assigned(layer, count.assigned)),
+                        Err(e) => link.send_message(LabelMsg::ClassFailed(layer, e)),
+                    }
+                });
+                true
+            }
+            LabelMsg::Assigned(layer, assigned) => {
+                // The edit is already on screen; this is only the check that
+                // the server agrees about how much there is. When it does not —
+                // two edits raced, or one never landed — the server is the
+                // truth and the panel is rebuilt from it.
+                let ours = self
+                    .layers
+                    .iter()
+                    .position(|l| l.id == layer)
+                    .and_then(|index| self.label_state(index))
+                    .map(|state| state.assigned.len());
+                if ours != Some(assigned) {
+                    self.reload_classes(ctx, layer);
+                }
+                false
+            }
+            LabelMsg::ClassFailed(layer, message) => {
+                let Some(index) = self.layers.iter().position(|l| l.id == layer) else {
+                    return false;
+                };
+                if let Some(state) = self.label_mut(index) {
+                    state.status = Some(message);
+                }
+                // The optimistic edit is now a claim nothing backs, so take the
+                // classes back from the server rather than leaving a class on
+                // screen that no save would write.
+                self.reload_classes(ctx, layer);
+                true
+            }
+            LabelMsg::ClassesLoaded(layer, classes) => {
+                let Some(index) = self.layers.iter().position(|l| l.id == layer) else {
+                    return false;
+                };
+                if let Some(state) = self.label_mut(index) {
+                    state.assigned = classes
+                        .assigned
+                        .iter()
+                        .map(|entry| (entry.id, entry.class.clone()))
+                        .collect();
+                }
+                self.repaint_classes(index);
+                true
+            }
+            LabelMsg::ColorByClass(index, on) => {
+                let Some(layer) = self.layers.get(index).map(|l| l.id.clone()) else {
+                    return false;
+                };
+                if let Some(state) = self.label_mut(index) {
+                    state.color_by_class = on;
+                }
+                // Both ways round: switching it off has to put back whatever
+                // the store declared, not leave the class colours frozen there.
+                self.reinstall_label_lut(&layer);
+                true
+            }
+            LabelMsg::SaveTarget(index, target) => {
+                if let Some(state) = self.label_mut(index) {
+                    state.save_target = target;
+                }
+                true
+            }
+            LabelMsg::SaveRegion(index, region) => {
+                if let Some(state) = self.label_mut(index) {
+                    state.region = region;
+                }
+                true
+            }
+            LabelMsg::SaveClasses(index) => {
+                let Some(layer) = self.layers.get(index).map(|l| l.id.clone()) else {
+                    return false;
+                };
+                let Some(state) = self.label_mut(index) else {
+                    return false;
+                };
+                state.saving = true;
+                state.status = None;
+                let target = state.save_target.trim().to_string();
+                let region = state.region.trim().to_string();
+                let link = ctx.link().clone();
+                spawn_local(async move {
+                    let result = api_client::save_label_classes(&layer, &target, &region).await;
+                    link.send_message(LabelMsg::ClassesSaved(layer, result));
+                });
+                true
+            }
+            LabelMsg::ClassesSaved(layer, result) => {
+                let Some(index) = self.layers.iter().position(|l| l.id == layer) else {
+                    return false;
+                };
+                let Some(state) = self.label_mut(index) else {
+                    return false;
+                };
+                state.saving = false;
+                state.status = Some(match result {
+                    // What was written *and what it was joined to*: a class
+                    // table is a column of numbers until the region says which
+                    // label image the ids belong to.
+                    Ok(saved) => format!(
+                        "wrote {} row(s) to {} as a {}, joined to {}",
+                        saved.rows, saved.target, saved.format, saved.region
+                    ),
+                    Err(e) => e,
+                });
+                true
+            }
         }
     }
 }
@@ -124,6 +316,52 @@ impl App {
         match &mut self.layers.get_mut(layer)?.ui {
             LayerUi::Labels(state) => Some(state),
             _ => None,
+        }
+    }
+
+    pub(super) fn label_state(&self, layer: usize) -> Option<&crate::layers::LabelUiState> {
+        match &self.layers.get(layer)?.ui {
+            LayerUi::Labels(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    /// Take a label layer's classes from the server.
+    ///
+    /// They live in the session rather than in the layer's metadata, so they do
+    /// not arrive with it: without this a reopened tab shows an empty panel
+    /// over a set of classes the server still holds, and the first save would
+    /// write it back empty.
+    pub(super) fn fetch_label_classes(&self, ctx: &Context<Self>) {
+        for layer in self.layers.iter().filter(|l| l.is_labels()) {
+            self.reload_classes(ctx, layer.id.clone());
+        }
+    }
+
+    fn reload_classes(&self, ctx: &Context<Self>, layer: String) {
+        let link = ctx.link().clone();
+        spawn_local(async move {
+            match api_client::fetch_label_classes(&layer).await {
+                Ok(classes) => link.send_message(LabelMsg::ClassesLoaded(layer, Box::new(classes))),
+                Err(e) => log::warn!("label classes: {e}"),
+            }
+        });
+    }
+
+    /// Put the class colours back on the canvas after an assignment moved them.
+    ///
+    /// Only when the layer is being coloured by class: otherwise the classes
+    /// are bookkeeping and repainting would throw away the colour table the
+    /// store or a feature column put there.
+    fn repaint_classes(&self, index: usize) {
+        let by_class = self
+            .label_state(index)
+            .is_some_and(|state| state.color_by_class);
+        if !by_class {
+            return;
+        }
+        if let Some(layer) = self.layers.get(index) {
+            self.reinstall_label_lut(&layer.id);
         }
     }
 

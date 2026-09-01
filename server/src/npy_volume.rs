@@ -19,10 +19,10 @@ use omezarr_viewer_common::{
 use std::path::Path;
 
 use crate::npy_header;
+use crate::pixels::{f32_bytes, project};
 use crate::source::{SourceRegistry, SourceSpec};
 use crate::zarr_reader::{
-    bytes_to_f32, PlaneAxis, PlaneBytes, PlaneRequest, Projection, TileBytes, TileEncoding,
-    TileRequest,
+    bytes_to_f32, PlaneAxis, PlaneBytes, PlaneRequest, TileBytes, TileEncoding, TileRequest,
 };
 
 // The header layer lives in `npy_header`, which decides this before a reader
@@ -275,47 +275,6 @@ impl NpyVolume {
     }
 }
 
-/// Reduce `planes` consecutive planes. Mirrors the zarr path's own reducer.
-fn project(pixels: &[f32], plane: usize, planes: u64, projection: Projection) -> Vec<f32> {
-    let planes = planes as usize;
-    if plane == 0 || planes <= 1 {
-        return pixels.to_vec();
-    }
-    let mut out = vec![
-        match projection {
-            Projection::Max => f32::NEG_INFINITY,
-            Projection::Mean => 0.0,
-        };
-        plane
-    ];
-    for index in 0..planes {
-        let at = index * plane;
-        let Some(slice) = pixels.get(at..at + plane) else {
-            break;
-        };
-        for (accumulator, value) in out.iter_mut().zip(slice) {
-            match projection {
-                Projection::Max => *accumulator = accumulator.max(*value),
-                Projection::Mean => *accumulator += *value,
-            }
-        }
-    }
-    if projection == Projection::Mean {
-        for value in out.iter_mut() {
-            *value /= planes as f32;
-        }
-    }
-    out
-}
-
-fn f32_bytes(pixels: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(pixels.len() * 4);
-    for value in pixels {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
-}
-
 /// The parsed `.npy` header.
 struct Header {
     offset: usize,
@@ -391,6 +350,7 @@ fn describe(header: &Header) -> DatasetInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::zarr_reader::Projection;
 
     use crate::npy_header::write as npy;
 

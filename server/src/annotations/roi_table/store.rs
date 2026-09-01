@@ -40,7 +40,7 @@ pub(crate) fn filesystem(root: &Path) -> Result<Arc<FilesystemStore>> {
 ///
 /// `Group::open` finds either version and merges a v2 `.zattrs` into the
 /// metadata, so nothing here has to know which one it is looking at.
-fn attributes_at(
+pub(crate) fn attributes_at(
     store: &Arc<FilesystemStore>,
     path: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -49,7 +49,7 @@ fn attributes_at(
         .unwrap_or_default()
 }
 
-fn check_name(name: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         bail!("`{name}` is not a table name");
     }

@@ -187,11 +187,11 @@ fn table_prefix(name: &str) -> String {
     format!("tables/{name}")
 }
 
-fn payload_key(name: &str, payload: &str) -> Result<StoreKey> {
+pub(crate) fn payload_key(name: &str, payload: &str) -> Result<StoreKey> {
     StoreKey::new(format!("{}/{payload}", table_prefix(name))).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-fn table_path(name: &str) -> String {
+pub(crate) fn table_path(name: &str) -> String {
     format!("/{}", table_prefix(name))
 }
 
@@ -301,7 +301,7 @@ fn table_attributes(scale: WorldScale) -> serde_json::Value {
 /// Merged, never replaced: a store may well hold tables this viewer knows
 /// nothing about, and dropping their names from the index would make them
 /// invisible to every reader that trusts it.
-fn merged_index(
+pub(crate) fn merged_index(
     existing: &serde_json::Map<String, serde_json::Value>,
     name: &str,
 ) -> serde_json::Value {
@@ -386,6 +386,7 @@ fn backend_of(attributes: &serde_json::Map<String, serde_json::Value>) -> String
 
 mod anndata;
 mod backends;
+pub mod classes;
 mod columns;
 mod store;
 

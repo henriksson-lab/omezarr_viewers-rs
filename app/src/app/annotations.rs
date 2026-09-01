@@ -324,6 +324,8 @@ impl App {
             ) {
                 (Ok(points), Ok(lines), Ok(fills)) => uploaded.push(AnnotBuffer {
                     color: batch.color,
+                    radius: batch.radius,
+                    markers: batch.markers,
                     points,
                     lines,
                     fills,

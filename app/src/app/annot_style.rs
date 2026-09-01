@@ -11,6 +11,10 @@ pub enum AnnotStyleMsg {
     Size(usize, f32),
     Slab(usize, f32),
     ColorByClass(usize, bool),
+    /// Size this layer's points by a world radius rather than by screen pixels.
+    WorldRadius(usize, bool),
+    /// The radius the class new shapes get draws at, in world pixels.
+    Radius(usize, f32),
     Filled(usize, bool),
     /// The object type new shapes in this layer get.
     NewObjectType(usize, ObjectType),
@@ -39,6 +43,22 @@ impl App {
                 if let Some(state) = self.annot_mut(index) {
                     state.object_type = kind;
                 }
+                true
+            }
+            AnnotStyleMsg::WorldRadius(index, on) => {
+                if let Some(state) = self.annot_mut(index) {
+                    state.world_radius = on;
+                }
+                // The radius is part of the batch key, so the buffers say which
+                // mode they were built in and have to be rebuilt when it moves.
+                self.rebuild_annotations(index);
+                true
+            }
+            AnnotStyleMsg::Radius(index, value) => {
+                if let Some(state) = self.annot_mut(index) {
+                    state.set_radius(value);
+                }
+                self.rebuild_annotations(index);
                 true
             }
             AnnotStyleMsg::Filled(index, on) => {

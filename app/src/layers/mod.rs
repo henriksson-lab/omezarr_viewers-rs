@@ -10,6 +10,8 @@
 //! it by a per-level scale, which is the only reason a coarser label volume
 //! lands on top of the image rather than in a corner of it.
 
+use std::collections::BTreeMap;
+
 use omezarr_viewer_common::{
     DatasetInfo, LabelColor, LabelProperty, LayerInfo, LayerKind, TableInfo,
 };
@@ -77,9 +79,92 @@ pub struct LabelUiState {
     /// This is what a feature table is *for*: it has no coordinates, only a row
     /// per label id, so the way to see it is to paint the ids it describes.
     pub colored_by: Option<(String, String)>,
+
+    // --- Classing the ids, for training an object classifier.
+    //
+    // The instances already exist — a segmentation somebody else produced — so
+    // the annotation is a class per id and the raster is never touched.
+    /// Does a click on the image class the id it lands on?
+    ///
+    /// A mode rather than always-on, because clicking is also how a label is
+    /// inspected, and a curator scrolling through ids must be able to look
+    /// without writing.
+    pub classing: bool,
+    /// The class the *next* click assigns. Empty is a class in its own right:
+    /// "looked at, nothing in particular".
+    pub class: String,
+    /// The class of every id that has one.
+    ///
+    /// An id **absent** here has not been looked at; an id present with an
+    /// empty class has been looked at and was nothing in particular. Those are
+    /// different facts about the training set and nothing may collapse them —
+    /// which is why this is a map with a possibly-empty value rather than a set
+    /// of named ids.
+    pub assigned: BTreeMap<u64, String>,
+    /// Paint each classed id by its class, leaving the rest as they were.
+    pub color_by_class: bool,
+    /// Where the class table would be written, and the label image it names as
+    /// its `region` — both guessed from the layer's own source and editable.
+    pub save_target: String,
+    pub region: String,
+    /// True between asking to save and hearing back.
+    pub saving: bool,
+    /// What the last save, or the last edit that failed, said.
+    pub status: Option<String>,
 }
 
 impl LabelUiState {
+    /// Every class in use, in id order, first seen first.
+    ///
+    /// The same order the server reports, so the panel's key and the table's
+    /// columns do not disagree about which class came first.
+    pub fn classes_in_use(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for class in self.assigned.values() {
+            if !seen.iter().any(|c| c == class) {
+                seen.push(class.clone());
+            }
+        }
+        seen
+    }
+
+    /// How many ids were looked at and found to be nothing in particular.
+    ///
+    /// Counted separately from the rest because it is the number that says a
+    /// curator has covered ground: a negative example is evidence, an id nobody
+    /// opened is not.
+    pub fn classed_as_nothing(&self) -> usize {
+        self.assigned.values().filter(|c| c.is_empty()).count()
+    }
+
+    /// The colour table for the classes assigned so far, or `None` when there
+    /// is nothing to paint.
+    ///
+    /// An unassigned id is deliberately left out rather than given a colour: a
+    /// missing entry falls back to the hash colouring, so what is classed and
+    /// what has not been looked at are told apart on the canvas without a
+    /// legend.
+    pub fn class_lut(&self) -> Option<Vec<u8>> {
+        let max_id = self.assigned.keys().copied().max()?;
+        if max_id > 65_535 {
+            // The same ceiling the other tables have: an atlas with ids in the
+            // millions wants a hash map on the GPU, not a 4 MB texture of holes.
+            return None;
+        }
+        let mut rgba = vec![0u8; (max_id as usize + 1) * 4];
+        for (id, class) in &self.assigned {
+            let [r, g, b] = assigned_class_color(class);
+            let at = *id as usize * 4;
+            rgba[at] = (r * 255.0) as u8;
+            rgba[at + 1] = (g * 255.0) as u8;
+            rgba[at + 2] = (b * 255.0) as u8;
+            // Opaque, because a zero alpha is how the shader is told an id is
+            // not in the table.
+            rgba[at + 3] = 255;
+        }
+        Some(rgba)
+    }
+
     /// What the store says about one id, as a line of text.
     ///
     /// The spec lets each id carry a different set of keys, so this reports
@@ -116,6 +201,14 @@ impl Default for LabelUiState {
             colors: None,
             properties: None,
             colored_by: None,
+            classing: false,
+            class: String::new(),
+            assigned: BTreeMap::new(),
+            color_by_class: false,
+            save_target: String::new(),
+            region: String::new(),
+            saving: false,
+            status: None,
         }
     }
 }
@@ -145,6 +238,102 @@ impl TableUiState {
             coloring: None,
             target: None,
         }
+    }
+}
+
+/// The colour a class name draws in.
+///
+/// A stable hash of the name rather than a palette walked in order, because two
+/// sessions that loaded the same classes in a different order would otherwise
+/// disagree about which colour "vessel" is, and the name is the only thing both
+/// have. Shared by the shapes and the label ids so one class means one colour
+/// however it is carried.
+pub fn class_color(class: &str) -> [f32; 3] {
+    let mut hash: u32 = 2166136261;
+    for byte in class.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hsv_to_rgb(
+        (hash >> 8 & 1023) as f32 / 1023.0,
+        0.55 + (hash >> 18 & 63) as f32 / 63.0 * 0.35,
+        0.75 + (hash >> 24 & 63) as f32 / 63.0 * 0.25,
+    )
+}
+
+/// Where a label layer's class table would go, and the label image it names as
+/// its `region` — `("", "")` when the source names no zarr store.
+///
+/// `/x/img.zarr/labels/nuclei` gives `/x/img.zarr/tables/nuclei_classes` and
+/// `../labels/nuclei`: ngio's `region` is relative to the **tables group**, not
+/// to the table inside it, which is why one `..` reaches the store root.
+///
+/// Guessed rather than asked for, because the path is already in the layer and
+/// a retyped one is where a table joined to the wrong image comes from. A
+/// source with no `.zarr` in it — a `.npy` mask — is left empty rather than
+/// given a plausible path pointing at no store.
+pub fn class_table_default(source: &str) -> (String, String) {
+    let trimmed = source.trim().trim_end_matches(['/', '\\']);
+    // The store root is the *last* component ending in `.zarr`: the label
+    // image is a group inside it, and the tables group is that group's sibling.
+    let mut root: Option<&str> = None;
+    for (at, ch) in trimmed.char_indices() {
+        if (ch == '/' || ch == '\\') && trimmed[..at].ends_with(".zarr") {
+            root = Some(&trimmed[..at]);
+        }
+    }
+    if trimmed.ends_with(".zarr") {
+        root = Some(trimmed);
+    }
+    let Some(root) = root else {
+        return (String::new(), String::new());
+    };
+    let inside = trimmed[root.len()..].trim_start_matches(['/', '\\']);
+    let (leaf, region) = if inside.is_empty() {
+        // The label image is the store root itself, so the region is simply the
+        // group the tables sit in.
+        let name = root
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("labels")
+            .trim_end_matches(".zarr");
+        (name.to_string(), "..".to_string())
+    } else {
+        let name = inside.rsplit(['/', '\\']).next().unwrap_or("labels");
+        (
+            name.to_string(),
+            format!("../{}", inside.replace('\\', "/")),
+        )
+    };
+    (format!("{root}/tables/{leaf}_classes"), region)
+}
+
+/// The colour an *assigned* class draws in, empty one included.
+///
+/// Grey for the empty class, because "looked at, nothing in particular" is a
+/// decision and has to read as one — distinct from the named classes, and
+/// distinct from the hash colour an id nobody has opened keeps. One function
+/// rather than two, so the canvas and the key in the panel cannot disagree.
+pub fn assigned_class_color(class: &str) -> [f32; 3] {
+    if class.is_empty() {
+        [0.55, 0.55, 0.55]
+    } else {
+        class_color(class)
+    }
+}
+
+/// The label shader's `id_color`, on the CPU, for class colours.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let i = (h * 6.0).floor();
+    let f = h * 6.0 - i;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - f * s), v * (1.0 - (1.0 - f) * s));
+    match (i as i32).rem_euclid(6) {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
     }
 }
 
@@ -190,6 +379,13 @@ pub struct LayerState {
     /// The server's layer id — what `layer=` carries.
     pub id: String,
     pub name: String,
+    /// The URI the layer was opened from.
+    ///
+    /// Kept because it is the only thing that says where a *write* belonging to
+    /// this layer should go: a class table is written into the same store as
+    /// the label image it describes, and the path is the only place that store
+    /// is named.
+    pub source: String,
     pub visible: bool,
     /// The pyramid behind this layer — absent for an object layer, which has
     /// rows rather than pixels.
@@ -220,6 +416,7 @@ impl LayerState {
                 Some(Self {
                     id: info.id.clone(),
                     name: info.name.clone(),
+                    source: info.source.clone(),
                     visible: true,
                     ui: LayerUi::Image {
                         channels: channels_from(dataset, dtype_max),
@@ -232,20 +429,30 @@ impl LayerState {
                 dataset,
                 colors,
                 properties,
-            } => Some(Self {
-                id: info.id.clone(),
-                name: info.name.clone(),
-                visible: true,
-                ui: LayerUi::Labels(LabelUiState {
-                    colors: colors.clone(),
-                    properties: properties.clone(),
-                    ..LabelUiState::default()
-                }),
-                dataset: Some(dataset.clone()),
-            }),
+            } => {
+                // Where a class table would go, guessed from the label image's
+                // own path so a curator is not asked to retype what the layer
+                // already knows.
+                let (save_target, region) = class_table_default(&info.source);
+                Some(Self {
+                    id: info.id.clone(),
+                    name: info.name.clone(),
+                    source: info.source.clone(),
+                    visible: true,
+                    ui: LayerUi::Labels(LabelUiState {
+                        colors: colors.clone(),
+                        properties: properties.clone(),
+                        save_target,
+                        region,
+                        ..LabelUiState::default()
+                    }),
+                    dataset: Some(dataset.clone()),
+                })
+            }
             LayerKind::Objects { schema, count } => Some(Self {
                 id: info.id.clone(),
                 name: info.name.clone(),
+                source: info.source.clone(),
                 visible: true,
                 dataset: None,
                 ui: LayerUi::Objects(ObjectUiState::new(schema.clone(), *count)),
@@ -253,6 +460,7 @@ impl LayerState {
             LayerKind::Table { table } => Some(Self {
                 id: info.id.clone(),
                 name: info.name.clone(),
+                source: info.source.clone(),
                 visible: true,
                 dataset: None,
                 ui: LayerUi::Table(TableUiState::new(table.clone())),
@@ -263,6 +471,7 @@ impl LayerState {
             } => Some(Self {
                 id: info.id.clone(),
                 name: info.name.clone(),
+                source: info.source.clone(),
                 visible: true,
                 dataset: None,
                 ui: LayerUi::Annotations(AnnotUiState::new(annotations.clone(), target.clone())),
@@ -476,6 +685,12 @@ impl LayerState {
         let LayerUi::Labels(state) = &self.ui else {
             return None;
         };
+        // What is being classed right now wins over what the store declared:
+        // the point of colouring by class is watching the work land, and a
+        // store's own palette is the picture that was there before it started.
+        if state.color_by_class {
+            return state.class_lut();
+        }
         let colors = state.colors.as_ref()?;
         let max_id = colors
             .iter()
@@ -597,6 +812,70 @@ mod tests {
         // texture of holes; the honest answer is to decline.
         assert!(LayerState::measurement_lut(&[70_000], &[1.0]).is_none());
         assert!(LayerState::measurement_lut(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn a_class_table_is_guessed_from_the_label_image_it_would_describe() {
+        // The region is relative to the *tables group*, so one `..` off it
+        // reaches the store root and the rest is the label image's own path.
+        assert_eq!(
+            class_table_default("/x/img.zarr/labels/nuclei"),
+            (
+                "/x/img.zarr/tables/nuclei_classes".to_string(),
+                "../labels/nuclei".to_string()
+            )
+        );
+        // Windows writes the same path the other way round, and a table path
+        // the server can split has to come out of it either way.
+        assert_eq!(
+            class_table_default(r"C:\x\img.zarr\labels\nuclei"),
+            (
+                r"C:\x\img.zarr/tables/nuclei_classes".to_string(),
+                "../labels/nuclei".to_string()
+            )
+        );
+        // A label image that *is* the store: the region is the group the
+        // tables sit in.
+        assert_eq!(
+            class_table_default("s3://bucket/nuclei.zarr/"),
+            (
+                "s3://bucket/nuclei.zarr/tables/nuclei_classes".to_string(),
+                "..".to_string()
+            )
+        );
+        // A `.npy` mask names no store, and a plausible path pointing at none
+        // is worse than an empty box.
+        assert_eq!(
+            class_table_default("/x/mask.npy"),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn a_class_lut_paints_the_classed_ids_and_leaves_the_rest_alone() {
+        let mut state = LabelUiState::default();
+        state.assigned.insert(2, "tumour".to_string());
+        // Looked at, nothing in particular — a decision, and not the same as
+        // id 1, which nobody has opened.
+        state.assigned.insert(3, String::new());
+        let lut = state.class_lut().expect("two classed ids");
+        assert_eq!(lut.len(), 4 * 4, "sized to the largest classed id");
+        let named: Vec<bool> = (0..4).map(|id| named(&lut, id)).collect();
+        assert_eq!(named, vec![false, false, true, true], "only the classed");
+        assert_ne!(
+            &lut[8..11],
+            &lut[12..15],
+            "nothing-in-particular is its own"
+        );
+    }
+
+    #[test]
+    fn a_class_means_one_colour_wherever_it_is_carried() {
+        // A hash of the name, so a shape classed "vessel" and a label id
+        // classed "vessel" are the same colour in the same session and in the
+        // next one.
+        assert_eq!(class_color("vessel"), class_color("vessel"));
+        assert_ne!(class_color("vessel"), class_color("cell"));
     }
 
     #[test]

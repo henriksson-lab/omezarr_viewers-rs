@@ -17,12 +17,24 @@ uniform vec2 u_tile_offset;  // tile position in image pixels
 uniform vec2 u_tile_size;    // tile size in image pixels
 uniform vec2 u_image_size;   // full image size in image pixels
 
+// Screen pixels per image pixel — the scale `to_clip` applies, isotropically.
+//
+// Fall it out of the transform below: a clip x is
+// `(p / W - 0.5) * 2 * fit * W / C`, and a clip unit is `C / 2` pixels, so one
+// image pixel is `fit` screen pixels, and the same for y. Anything that has to
+// be a *true size in the image* — a picking circle's radius — multiplies by
+// this rather than carrying a second copy of the camera, which could disagree
+// with the geometry drawn around it.
+float world_to_screen() {
+    return u_zoom * min(u_canvas_size.x / u_image_size.x,
+                        u_canvas_size.y / u_image_size.y);
+}
+
 // Image-pixel position to clip space, the one place the camera is applied.
 vec4 to_clip(vec2 img_pixel) {
     vec2 img_pos = img_pixel / u_image_size;
     vec2 centered = (img_pos - 0.5) * 2.0;
-    float fit = u_zoom * min(u_canvas_size.x / u_image_size.x,
-                             u_canvas_size.y / u_image_size.y);
+    float fit = world_to_screen();
     vec2 scale = vec2(fit * u_image_size.x / u_canvas_size.x,
                       fit * u_image_size.y / u_canvas_size.y);
     vec2 screen_pos = (centered * scale) + u_pan * 2.0 / u_canvas_size;
@@ -186,8 +198,15 @@ void main() {
 ///
 /// `POINTS` rather than instanced quads because the shape is a disc and the
 /// data is one position per row — an instanced quad would upload four vertices
-/// to say the same thing. The size is in *screen* pixels, so a cell stays
-/// visible when zoomed out and does not swell into a blob when zoomed in.
+/// to say the same thing.
+///
+/// Two ways to be sized, and they answer different questions. A **marker** is a
+/// fixed number of *screen* pixels, so a cell stays visible when zoomed out and
+/// does not swell into a blob when zoomed in — right for object layers, and for
+/// an annotation point that is only saying "here". A **radius** is a fact about
+/// the image: a particle pick's circle is judged by whether it encloses the
+/// particle, so it has to cover the same image area at every zoom, which means
+/// `2 * radius * world_to_screen()` screen pixels and growing with the camera.
 pub fn point_vertex_shader() -> String {
     format!(
         r#"#version 300 es
@@ -197,7 +216,9 @@ layout(location = 0) in vec3 a_position;   // world (z, y, x)
 layout(location = 1) in float a_value;     // the coloured column, or NaN
 layout(location = 2) in float a_row;       // row index, for selection
 {CAMERA}
-uniform float u_point_size;   // screen pixels
+uniform float u_point_size;      // screen pixels — the marker size
+uniform float u_world_radius;    // world pixels; 0 selects the marker above
+uniform float u_max_point_size;  // this device's ALIASED_POINT_SIZE_RANGE cap
 uniform float u_z;            // the slice being viewed, in world z
 uniform float u_slab;         // z distance at which a point fades out
 uniform float u_selected_row;
@@ -213,7 +234,25 @@ void main() {{
     v_fade = u_slab > 0.0 ? clamp(1.0 - dz / u_slab, 0.0, 1.0) : 1.0;
     v_selected = abs(a_row - u_selected_row) < 0.5 ? 1.0 : 0.0;
     v_value = a_value;
-    gl_PointSize = u_point_size * (v_selected > 0.5 ? 1.6 : 1.0);
+
+    if (u_world_radius > 0.0) {{
+        // Both ends matter. Below a pixel or two the sprite is invisible, and a
+        // pick that vanished reads as no pick at all. Above the device's cap
+        // the result is not "large but wrong", it is unspecified — and what
+        // drivers do is clamp, which would show a radius nobody chose. So the
+        // CPU switches to real circle geometry before it gets here
+        // (`Renderer::point_sprite_fits`) and this clamp is only the backstop.
+        //
+        // A selected pick is *not* enlarged: a circle 60% larger than the
+        // radius it names no longer answers the question it was drawn for. The
+        // highlight is left to the colour.
+        float diameter = 2.0 * u_world_radius * world_to_screen();
+        gl_PointSize = clamp(diameter, 2.0, max(u_max_point_size, 2.0));
+    }} else {{
+        // A marker is a fixed screen size and swells when selected, which is an
+        // affordance rather than a measurement, so nothing here is clamped.
+        gl_PointSize = u_point_size * (v_selected > 0.5 ? 1.6 : 1.0);
+    }}
 }}
 "#
     )

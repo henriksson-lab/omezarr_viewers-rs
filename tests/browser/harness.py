@@ -189,6 +189,50 @@ class Viewer:
     def shift_click_world(self, x, y):
         self.browser.click(*self.to_screen(x, y), modifiers=SHIFT, settle=1.3)
 
+    def zoom(self, delta_y, at=None):
+        """Scroll to zoom, about the world point `at` (default: the centre).
+
+        Re-measures afterwards, because every screen coordinate the suite
+        computes depends on the camera and the whole point of zooming is to
+        change it.
+        """
+        world = at or (self.world[0] / 2, self.world[1] / 2)
+        self.browser.wheel(*self.to_screen(*world), delta_y)
+        self._measure_camera()
+
+    def _measure_camera(self):
+        """Read the camera back, so `to_screen` still tells the truth."""
+        state = self.browser.js(
+            "JSON.stringify((() => {"
+            "  const c = document.querySelector('.viewer-canvas');"
+            "  const r = c.getBoundingClientRect();"
+            "  return {x: r.left, y: r.top, w: r.width, h: r.height};"
+            "})())"
+        )
+        self.rect = json.loads(state)
+        self.fit = min(self.rect["w"] / self.world[0], self.rect["h"] / self.world[1])
+
+    def drawn_width_at(self, before, after, x, y, reach=260):
+        """How wide, in screen pixels, the change around `(x, y)` extends.
+
+        Walks out along the centre row from the point until the pixels stop
+        differing from `before`. A radius is only meaningful as a measured
+        extent — asserting that *something* changed would pass for a dot.
+        """
+        cx, cy = self.to_screen(x, y)
+        a, b = Image.open(before).convert("RGB"), Image.open(after).convert("RGB")
+        width, height = a.size
+
+        def differs(px, py):
+            px, py = min(max(int(px), 0), width - 1), min(max(int(py), 0), height - 1)
+            return sum(abs(p - q) for p, q in zip(a.getpixel((px, py)), b.getpixel((px, py)))) > 40
+
+        span = 0
+        for step in range(1, reach):
+            if differs(cx + step, cy) or differs(cx - step, cy):
+                span = step
+        return span * 2
+
     def press(self, label):
         """Click the button whose text is `label`."""
         ok = self.browser.js(

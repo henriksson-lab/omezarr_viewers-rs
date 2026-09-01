@@ -198,7 +198,7 @@ impl App {
 
     /// Put a label layer's own colour table back, after a measurement colouring
     /// is switched off.
-    fn reinstall_label_lut(&self, id: &str) {
+    pub(super) fn reinstall_label_lut(&self, id: &str) {
         let Some(layer) = self.layers.iter().find(|l| l.id == id) else {
             return;
         };

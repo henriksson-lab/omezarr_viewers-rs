@@ -129,6 +129,61 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
     ObjectStore::new(positions, columns, has_z)
 }
 
+/// Encode rows into a table blob, the way `blockflow`'s `RowBuilder::encode`
+/// does — the same layout this module's `read` accepts.
+///
+/// `positions` are the routing key: whole voxels, because that is what a table
+/// is keyed by and what decides which block a row belongs to. A caller whose
+/// geometry is finer than a voxel must carry the exact coordinate in an `f64`
+/// column and treat the key as an address, not as the value.
+pub fn write(positions: &[[u64; 3]], columns: &[NamedColumn]) -> Result<Vec<u8>> {
+    for column in columns {
+        let len = match &column.data {
+            ColumnData::U64(values) => values.len(),
+            ColumnData::F64(values) => values.len(),
+        };
+        if len != positions.len() {
+            bail!(
+                "column `{}` has {len} value(s) for {} row(s)",
+                column.name,
+                positions.len()
+            );
+        }
+    }
+
+    let mut words: Vec<u64> = vec![MAGIC, VERSION, columns.len() as u64, positions.len() as u64];
+    for column in columns {
+        words.push(match &column.data {
+            ColumnData::U64(_) => 1,
+            ColumnData::F64(_) => 2,
+        });
+        let name = column.name.as_bytes();
+        words.push(name.len() as u64);
+        // Zero-padded to a whole number of words; `read` truncates back to the
+        // declared length, so the padding never reaches a name.
+        for chunk in name.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            words.push(u64::from_le_bytes(word));
+        }
+    }
+    for (row, position) in positions.iter().enumerate() {
+        words.extend_from_slice(position);
+        for column in columns {
+            words.push(match &column.data {
+                ColumnData::U64(values) => values[row],
+                ColumnData::F64(values) => values[row].to_bits(),
+            });
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(words.len() * 8);
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 enum ColumnKind {
     U64,
     F64,
@@ -137,6 +192,57 @@ enum ColumnKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_table_reads_back_as_itself() {
+        // The round trip is the only check that matters for a format this
+        // reimplements rather than depends on: the writer and the reader are two
+        // hand-written statements of one layout, and a disagreement between them
+        // is exactly the drift the module header warns about.
+        let positions = vec![[0, 10, 20], [3, 40, 50], [0, 0, 0]];
+        let columns = vec![
+            NamedColumn {
+                name: "shape".into(),
+                data: ColumnData::U64(vec![1, 1, 7]),
+            },
+            NamedColumn {
+                // Deliberately not a multiple of eight bytes, so the name
+                // padding is exercised rather than assumed.
+                name: "half_width".into(),
+                data: ColumnData::F64(vec![5.5, 0.0, 379.59344482421875]),
+            },
+        ];
+        let blob = write(&positions, &columns).unwrap();
+        let back = read(&blob).unwrap();
+
+        assert_eq!(back.len(), 3);
+        // `world_position` applies the layer's space, which is the identity for
+        // a store built straight from a blob.
+        assert_eq!(back.world_position(1), Some([3.0, 40.0, 50.0]));
+        let widths = match &back.columns()[1].data {
+            ColumnData::F64(values) => values.clone(),
+            _ => panic!("half_width came back as the wrong type"),
+        };
+        // Exact, not approximate: an `f64` travels as `to_bits`, and the whole
+        // reason for that is a coordinate that must not move.
+        assert_eq!(widths[2], 379.59344482421875);
+        assert_eq!(back.columns()[0].name, "shape");
+        assert_eq!(back.columns()[1].name, "half_width");
+    }
+
+    #[test]
+    fn a_column_that_does_not_match_the_rows_is_refused() {
+        let err = write(
+            &[[0, 0, 0], [0, 1, 1]],
+            &[NamedColumn {
+                name: "short".into(),
+                data: ColumnData::U64(vec![1]),
+            }],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("short"), "{err}");
+    }
 
     /// Build a blob the way `blockflow::table::RowBuilder::encode` does.
     fn blob(columns: &[(&str, u64)], rows: &[Vec<u64>]) -> Vec<u8> {

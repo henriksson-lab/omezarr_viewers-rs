@@ -21,6 +21,11 @@ pub struct AnnotPanelProps {
     /// How the layer is drawn.
     pub style: LayerStyle,
     pub color_by_class: bool,
+    /// Size points by a world radius rather than by `style.size` screen pixels.
+    pub world_radius: bool,
+    /// The radius the *next* shape gets, in world pixels — the class named
+    /// below when there is one, the layer's default when there is not.
+    pub radius: f32,
     pub filled: bool,
     pub selected: Option<u64>,
     /// The class the next mark drawn into this layer gets.
@@ -45,6 +50,8 @@ pub struct AnnotPanelProps {
     pub on_visibility: Callback<bool>,
     pub on_color: Callback<[f32; 3]>,
     pub on_color_by_class: Callback<bool>,
+    pub on_world_radius: Callback<bool>,
+    pub on_radius: Callback<f32>,
     pub on_filled: Callback<bool>,
     pub on_opacity: Callback<f32>,
     pub on_size: Callback<f32>,
@@ -251,6 +258,29 @@ fn layer_section(props: &AnnotPanelProps) -> Html {
         <SliderRow label="Size" min="2" max="40" step="1"
             value={props.style.size.to_string()} display={format!("{:.0}px", props.style.size)}
             on_input={slider(props.on_size.clone())} />
+        // Two ways for a point to have a size, and the choice is per layer.
+        // A marker is a fixed number of screen pixels, which is what keeps a
+        // detection visible at every zoom. A radius is a claim about the
+        // image — a particle pick's circle either encloses the particle or it
+        // does not — so it is world pixels and moves with the camera.
+        <div class="slider-row">
+            <label title="Draw points as a circle of a true size in the image, \
+                          growing and shrinking with the zoom, rather than as a \
+                          fixed-size screen marker.">
+                <input type="checkbox" class="annot-world-radius"
+                    checked={props.world_radius}
+                    onchange={checkbox(props.on_world_radius.clone())} />
+                {" True size"}
+            </label>
+        </div>
+        // Only while it is in use: a radius the layer is not drawing with is a
+        // number that does nothing, which reads as a broken control.
+        if props.world_radius {
+            <SliderRow label={radius_label(props)} min="1" max="1024" step="1"
+                value={props.radius.to_string()}
+                display={format!("r {:.0}", props.radius)}
+                on_input={slider(props.on_radius.clone())} />
+        }
         <SliderRow label="Opacity" min="0" max="1" step="0.01"
             value={props.style.opacity.to_string()} display={format!("{:.2}", props.style.opacity)}
             on_input={slider(props.on_opacity.clone())} />
@@ -259,6 +289,19 @@ fn layer_section(props: &AnnotPanelProps) -> Html {
             display={if props.style.slab > 0.0 { format!("\u{00b1}{:.0}", props.style.slab) } else { "all z".to_string() }}
             on_input={slider(props.on_slab.clone())} />
         </>
+    }
+}
+
+/// What the radius row is called.
+///
+/// It edits one class's radius or the layer's default, decided by the class box
+/// above it, so it says which — a slider that silently changed meaning when a
+/// class was typed would be a slider nobody could trust.
+fn radius_label(props: &AnnotPanelProps) -> String {
+    if props.class.is_empty() {
+        "Radius".to_string()
+    } else {
+        format!("Radius ({})", props.class)
     }
 }
 

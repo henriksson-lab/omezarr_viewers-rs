@@ -17,6 +17,11 @@ build:
 # The frontend has no unit tests; it is checked by driving a real browser.
 # Needs Chrome and `pip install websocket-client pillow` — see
 # tests/browser/README.md. `make build` first: the server serves dist/.
+# Regenerate the README's screenshot. Same prerequisites as `test-browser`,
+# because it is the same machinery: a release build, `dist/`, and a Chrome.
+screenshot: build
+	python3 tools/screenshot.py
+
 test-browser:
 	python3 tests/browser/run.py
 

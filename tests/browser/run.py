@@ -24,7 +24,8 @@ sys.path.insert(0, os.path.join(HERE, "suites"))
 from cdp import ORIGIN_CHECK_FROM, Browser, chrome_version  # noqa: E402
 from harness import Checks, Server, Viewer, binary, demo_store  # noqa: E402
 
-SUITES = ["drawing", "editing", "classes", "hierarchy", "formats", "tables"]
+SUITES = ["drawing", "editing", "classes", "hierarchy", "formats", "tables", "picking",
+          "classing"]
 
 
 def feature_table(store):
@@ -74,6 +75,12 @@ def run_suite(module, shots, keep):
             nuclei = os.path.join(directory, "nuclei.zarr")
             shutil.copytree(os.path.join(directory, "labels.zarr"), nuclei)
             layers = [f"{nuclei}:labels", f"{store}/tables/features:annotations"]
+
+        if getattr(module, "NEEDS_LABELS", False):
+            # The demo's own labels, opened over the image. No annotation layer,
+            # deliberately: a click lands on the topmost layer that wants it, so
+            # one open above the labels would swallow every pick.
+            layers = [os.path.join(directory, "labels.zarr") + ":labels"]
 
         server = Server(store, layers=layers)
         viewer = Viewer(server, Browser(), shots)

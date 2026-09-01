@@ -67,6 +67,9 @@ impl App {
             }
             SessionMsg::SessionLoaded(session) => {
                 self.adopt_session(session);
+                // A label layer's classes live in the session rather than in
+                // its metadata, so they arrive on their own.
+                self.fetch_label_classes(ctx);
                 if self.canvas_state.is_some() {
                     self.install_label_luts();
                     self.load_tiles(ctx);

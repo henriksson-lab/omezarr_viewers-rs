@@ -488,6 +488,36 @@ pub struct Annotation {
     /// QuPath's own UUID, preserved so a round trip does not renumber objects.
     #[serde(default)]
     pub uuid: Option<String>,
+    /// The width this shape's outline covers, in the world's own pixels.
+    ///
+    /// `None` is a *geometric* line — a mathematical curve of no area, which is
+    /// what QuPath and GeoJSON mean by a `LineString`. `Some(w)` is a **stroke**:
+    /// the region within `w / 2` of the path, which is what a brush produces and
+    /// what a pixel classifier trains on.
+    ///
+    /// The distinction is the whole reason this is an `Option` rather than a
+    /// width defaulting to zero. A scribble asserts something about the pixels
+    /// it covers and nothing about any other pixel — that is *partial*
+    /// supervision, and it is what a closed region cannot express, because a
+    /// closed region implies background outside it. Storing the path and its
+    /// width rather than a painted mask keeps the assertion resolution-free:
+    /// whoever rasterises does so at the level they train at, instead of
+    /// inheriting whatever zoom the curator happened to be at.
+    #[serde(default)]
+    pub stroke_width: Option<f64>,
+    /// This shape asserts that **everything inside it is annotated**.
+    ///
+    /// Without such an assertion a trainer cannot interpret an uncovered pixel.
+    /// Sparse is the safe default — a scribble says something about the pixels
+    /// it covers and nothing about any other — but a model that never sees a
+    /// negative learns nothing, so somewhere the curator has to be able to say
+    /// "in *this* box I marked every one". Inside such a shape, uncovered means
+    /// background; outside every one of them, uncovered means unexamined.
+    ///
+    /// A region rather than a per-layer flag because one image is routinely both:
+    /// a few exhaustively-labelled crops, and casual scribbles elsewhere.
+    #[serde(default)]
+    pub dense_region: bool,
 }
 
 impl Default for Annotation {
@@ -511,6 +541,8 @@ impl Default for Annotation {
             metadata: BTreeMap::new(),
             parent: None,
             uuid: None,
+            stroke_width: None,
+            dense_region: false,
         }
     }
 }

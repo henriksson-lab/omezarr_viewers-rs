@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use omezarr_viewer_common::{LayerInfo, LayerKind, SessionInfo};
 use std::sync::Arc;
 
+use crate::annotations::roi_table::classes::LabelClasses;
 use crate::annotations::AnnotationSet;
 use crate::npy_volume::NpyVolume;
 use crate::objects::{self, ObjectSpace, ObjectStore};
@@ -63,6 +64,11 @@ pub enum LayerData {
         store: Volume,
         colors: Option<Vec<omezarr_viewer_common::LabelColor>>,
         properties: Option<Vec<omezarr_viewer_common::LabelProperty>>,
+        /// What each id *is*, when a curator has said. The label image itself
+        /// stays untouched — this is an assertion about somebody else's raster,
+        /// not an edit of it, which is why it lives here and saves to a table
+        /// beside the labels rather than into them.
+        classes: LabelClasses,
     },
     Objects(Arc<ObjectStore>),
     /// Mutable, unlike every other kind: this is the one a click edits.
@@ -136,6 +142,7 @@ impl Layer {
                 store,
                 colors,
                 properties,
+                ..
             } => LayerKind::Labels {
                 dataset: store.metadata().clone(),
                 colors: colors.clone(),
@@ -206,6 +213,23 @@ impl Session {
     pub fn table(&self, id: &str) -> Option<&crate::annotations::roi_table::RoiTable> {
         match &self.get(id)?.data {
             LayerData::Table(table) => Some(table),
+            _ => None,
+        }
+    }
+
+    /// What a label layer's ids have been classed as.
+    pub fn label_classes(&self, id: &str) -> Option<&LabelClasses> {
+        match &self.get(id)?.data {
+            LayerData::Labels { classes, .. } => Some(classes),
+            _ => None,
+        }
+    }
+
+    /// The same, mutably. A label layer is otherwise read-only: this classes
+    /// the ids in somebody else's raster without touching the raster.
+    pub fn label_classes_mut(&mut self, id: &str) -> Option<&mut LabelClasses> {
+        match &mut self.layers.iter_mut().find(|layer| layer.id == id)?.data {
+            LayerData::Labels { classes, .. } => Some(classes),
             _ => None,
         }
     }
@@ -432,6 +456,7 @@ impl Session {
                 colors: image_label_field(&store, "colors"),
                 properties: image_label_field(&store, "properties"),
                 store,
+                classes: LabelClasses::default(),
             }
         } else {
             LayerData::Image(store)

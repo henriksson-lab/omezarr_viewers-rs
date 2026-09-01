@@ -26,12 +26,14 @@ use crate::zarr_reader::S3Config;
 // struct share the type namespace, so a `mod objects` would shadow the
 // re-exported `objects` route and `api::objects` would stop naming a service.
 mod annotation_routes;
+mod labels;
 mod object_routes;
 mod pixels;
 mod session;
 mod tables;
 
 pub use annotation_routes::*;
+pub use labels::*;
 pub use object_routes::*;
 pub use pixels::*;
 pub use session::*;
@@ -76,6 +78,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(open_project)
         .service(add_layer)
         .service(remove_layer)
+        // Before `{layer}`-shaped annotation routes for the same reason the
+        // table routes are: a literal segment also matches a parameter.
+        .service(label_classes)
+        .service(set_label_class)
+        .service(save_label_classes)
+        .service(clear_label_class)
         .service(list_tables)
         .service(table_rows)
         .service(table_column)

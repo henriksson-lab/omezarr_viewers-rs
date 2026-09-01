@@ -1,4 +1,5 @@
 use js_sys::{Float32Array, Uint32Array, Uint8Array};
+use wasm_bindgen::JsCast;
 use web_sys::{WebGl2RenderingContext, WebGlTexture};
 
 use super::context::GlContext;
@@ -91,8 +92,15 @@ impl Default for LineRenderInfo {
 pub struct PointRenderInfo {
     pub color: [f32; 3],
     pub opacity: f32,
-    /// Sprite diameter in screen pixels.
+    /// Sprite diameter in screen pixels — the marker size, used when
+    /// `world_radius` is 0.
     pub size: f32,
+    /// Radius in *world* pixels, or 0 for the screen-space marker above.
+    ///
+    /// A particle pick is judged by whether its circle encloses the particle,
+    /// so its size is a fact about the image and has to survive a zoom. Object
+    /// layers leave this at 0 and keep the marker.
+    pub world_radius: f32,
     /// Colour by the value column rather than by `color`.
     pub color_by_value: bool,
     pub value_range: [f32; 2],
@@ -112,6 +120,7 @@ impl Default for PointRenderInfo {
             color: [1.0, 0.85, 0.2],
             opacity: 0.9,
             size: 9.0,
+            world_radius: 0.0,
             color_by_value: false,
             value_range: [0.0, 1.0],
             hollow: false,
@@ -150,6 +159,28 @@ pub struct Renderer {
     quad_vao: web_sys::WebGlVertexArrayObject,
     /// One RGBA8 colour table per label layer, keyed by layer id.
     luts: std::collections::HashMap<String, (WebGlTexture, i32)>,
+    /// The largest `gl_PointSize` this device will honour, asked for once.
+    ///
+    /// WebGL2 does not promise a useful number here — `ALIASED_POINT_SIZE_RANGE`
+    /// is implementation-dependent and the floor the spec requires is 1 — so it
+    /// is queried rather than assumed, and a world-radius circle bigger than it
+    /// is drawn as geometry instead of being clamped into a wrong radius.
+    max_point_size: f32,
+}
+
+/// What to believe when the driver will not say. Deliberately small: erring low
+/// costs a switch to circle geometry, erring high draws the wrong size.
+const POINT_SIZE_CAP_FALLBACK: f32 = 64.0;
+
+/// The largest point sprite this context will draw.
+fn query_point_size_cap(gl: &WebGl2RenderingContext) -> f32 {
+    gl.get_parameter(WebGl2RenderingContext::ALIASED_POINT_SIZE_RANGE)
+        .ok()
+        .and_then(|value| value.dyn_into::<Float32Array>().ok())
+        .filter(|range| range.length() >= 2)
+        .map(|range| range.get_index(1))
+        .filter(|cap| cap.is_finite() && *cap >= 1.0)
+        .unwrap_or(POINT_SIZE_CAP_FALLBACK)
 }
 
 impl Renderer {
@@ -193,10 +224,13 @@ impl Renderer {
 
         gl.bind_vertex_array(None);
 
+        let max_point_size = query_point_size_cap(&ctx.gl);
+
         Ok(Self {
             ctx,
             quad_vao: vao,
             luts: std::collections::HashMap::new(),
+            max_point_size,
         })
     }
 
@@ -630,6 +664,8 @@ impl Renderer {
             }
         };
         set1("u_point_size", info.size);
+        set1("u_world_radius", info.world_radius);
+        set1("u_max_point_size", self.max_point_size);
         set1("u_z", info.z);
         set1("u_slab", info.slab);
         set1("u_selected_row", info.selected_row);
@@ -644,6 +680,32 @@ impl Renderer {
         }
 
         gl.draw_arrays(WebGl2RenderingContext::POINTS, 0, points.count as i32);
+    }
+
+    /// Screen pixels per world pixel: the shader's `world_to_screen()`, on the
+    /// CPU, so a caller can decide what will fit before asking the GPU for it.
+    ///
+    /// One function, two languages, and they must agree — a circle drawn as
+    /// geometry and the sprite it replaces have to be the same size, or the
+    /// picture jumps at the zoom where one takes over from the other.
+    pub fn world_scale(placement: &TilePlacement) -> f32 {
+        if placement.image_size.0 <= 0.0 || placement.image_size.1 <= 0.0 {
+            return 0.0;
+        }
+        placement.zoom
+            * (placement.canvas_size.0 / placement.image_size.0)
+                .min(placement.canvas_size.1 / placement.image_size.1)
+    }
+
+    /// Can a world radius still be drawn as a point sprite at this zoom?
+    ///
+    /// False means the caller must draw the circle as geometry: past the
+    /// device's cap a sprite is not merely large, it is unspecified, and what
+    /// implementations actually do is clamp — which would show a radius the
+    /// annotator did not choose, in the one mode whose whole purpose is that
+    /// the circle is the size it says it is.
+    pub fn point_sprite_fits(&self, placement: &TilePlacement, radius: f32) -> bool {
+        2.0 * radius * Self::world_scale(placement) <= self.max_point_size
     }
 
     /// Upload one batch of box outlines.
@@ -752,4 +814,64 @@ pub struct TilePlacement {
     pub canvas_size: (f32, f32),
     pub pan: (f32, f32),
     pub zoom: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placement(zoom: f32, world: (f32, f32), canvas: (f32, f32)) -> TilePlacement {
+        TilePlacement {
+            tile_offset: (0.0, 0.0),
+            tile_size: (1.0, 1.0),
+            image_size: world,
+            canvas_size: canvas,
+            pan: (0.0, 0.0),
+            zoom,
+        }
+    }
+
+    /// `world_to_screen()` in the shader, arithmetic for arithmetic.
+    ///
+    /// The two must agree: a circle drawn as geometry and the point sprite it
+    /// replaces are the same circle, and if the CPU and the GPU disagree about
+    /// the scale the picture jumps at the zoom where one hands over to the
+    /// other.
+    fn shader_world_to_screen(p: &TilePlacement) -> f32 {
+        p.zoom * (p.canvas_size.0 / p.image_size.0).min(p.canvas_size.1 / p.image_size.1)
+    }
+
+    #[test]
+    fn the_world_scale_is_the_one_the_vertex_shader_applies() {
+        for zoom in [0.25_f32, 1.0, 4.0, 37.5] {
+            let p = placement(zoom, (2048.0, 1024.0), (800.0, 600.0));
+            assert!((Renderer::world_scale(&p) - shader_world_to_screen(&p)).abs() < 1e-6);
+        }
+        // Fit-to-window: the whole 2048-wide image across an 800px canvas is
+        // 800/2048 screen pixels per world pixel, and a 100-pixel radius is
+        // therefore 39 screen pixels across.
+        let p = placement(1.0, (2048.0, 1024.0), (800.0, 600.0));
+        let scale = Renderer::world_scale(&p);
+        assert!((scale - 800.0 / 2048.0).abs() < 1e-6, "{scale}");
+        assert!((2.0 * 100.0 * scale - 78.125).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_world_with_no_size_yields_no_scale_rather_than_infinity() {
+        assert_eq!(
+            Renderer::world_scale(&placement(1.0, (0.0, 0.0), (800.0, 600.0))),
+            0.0
+        );
+    }
+
+    #[test]
+    fn a_zoomed_in_radius_stops_fitting_in_a_point_sprite() {
+        // The whole reason for the geometry path: 2 * r * scale is unbounded
+        // and the device's cap is not.
+        let cap = POINT_SIZE_CAP_FALLBACK;
+        let p = placement(1.0, (1000.0, 1000.0), (1000.0, 1000.0));
+        assert!((Renderer::world_scale(&p) - 1.0).abs() < 1e-6);
+        assert!(2.0 * (cap / 4.0) <= cap, "a small radius fits");
+        assert!(2.0 * (cap * 2.0) > cap, "a large one cannot");
+    }
 }

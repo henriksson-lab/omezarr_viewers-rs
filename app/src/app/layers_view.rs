@@ -356,6 +356,8 @@ impl App {
                     annotations={state.annotations.clone()}
                     style={state.style}
                     color_by_class={state.color_by_class}
+                    world_radius={state.world_radius}
+                    radius={state.current_radius()}
                     filled={state.filled}
                     selected={state.selected}
                     class={state.class.clone()}
@@ -372,6 +374,8 @@ impl App {
                     on_visibility={link.callback(move |v| SessionMsg::SetLayerVisible(index, v))}
                     on_color={link.callback(move |v| AnnotStyleMsg::Color(index, v))}
                     on_color_by_class={link.callback(move |v| AnnotStyleMsg::ColorByClass(index, v))}
+                    on_world_radius={link.callback(move |v| AnnotStyleMsg::WorldRadius(index, v))}
+                    on_radius={link.callback(move |v| AnnotStyleMsg::Radius(index, v))}
                     on_filled={link.callback(move |v| AnnotStyleMsg::Filled(index, v))}
                     on_opacity={link.callback(move |v| AnnotStyleMsg::Opacity(index, v))}
                     on_size={link.callback(move |v| AnnotStyleMsg::Size(index, v))}
@@ -406,6 +410,10 @@ impl App {
         let LayerUi::Labels(state) = &layer.ui else {
             return html! {};
         };
+        // The id the panel's buttons act on, captured once: a callback cannot
+        // read the state, and the two buttons must mean the same id as the line
+        // above them.
+        let selected = state.selected as u64;
         html! {
             <div class="layer-block">
                 <LabelPanel
@@ -416,11 +424,33 @@ impl App {
                     selected={state.selected}
                     only_selected={state.only_selected}
                     has_lut={layer.label_lut().is_some()}
+                    classing={state.classing}
+                    class={state.class.clone()}
+                    // `None` and `Some("")` are different answers — never
+                    // looked at, and looked at and nothing in particular — so
+                    // the lookup is passed through as it is.
+                    selected_class={state.assigned.get(&(state.selected as u64)).cloned()}
+                    assigned={state.assigned.len()}
+                    as_nothing={state.classed_as_nothing()}
+                    classes={state.classes_in_use()}
+                    color_by_class={state.color_by_class}
+                    save_target={state.save_target.clone()}
+                    region={state.region.clone()}
+                    saving={state.saving}
+                    status={state.status.clone()}
                     on_visibility={link.callback(move |v| SessionMsg::SetLayerVisible(index, v))}
                     on_opacity={link.callback(move |v| LabelMsg::Opacity(index, v))}
                     on_outline={link.callback(move |v| LabelMsg::Outline(index, v))}
                     on_only_selected={link.callback(move |v| LabelMsg::OnlySelected(index, v))}
                     on_clear_selection={link.callback(move |_| LabelMsg::ClearSelection(index))}
+                    on_classing={link.callback(move |v| LabelMsg::Classing(index, v))}
+                    on_class={link.callback(move |v| LabelMsg::SetClass(index, v))}
+                    on_assign={link.callback(move |_| LabelMsg::Assign(index, selected))}
+                    on_unassign={link.callback(move |_| LabelMsg::Unassign(index, selected))}
+                    on_color_by_class={link.callback(move |v| LabelMsg::ColorByClass(index, v))}
+                    on_save_target={link.callback(move |v| LabelMsg::SaveTarget(index, v))}
+                    on_region={link.callback(move |v| LabelMsg::SaveRegion(index, v))}
+                    on_save={link.callback(move |_| LabelMsg::SaveClasses(index))}
                     on_remove={link.callback(move |_| SessionMsg::RemoveLayer(id.clone()))}
                 />
             </div>

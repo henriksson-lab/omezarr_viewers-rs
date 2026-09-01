@@ -11,6 +11,7 @@ pub mod npy_header;
 pub mod npy_volume;
 pub mod objects;
 pub mod ontology;
+pub mod pixels;
 pub mod project;
 pub mod session;
 pub mod source;

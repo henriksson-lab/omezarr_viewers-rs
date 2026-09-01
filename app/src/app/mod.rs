@@ -440,6 +440,10 @@ impl App {
                             color: state.style.color,
                             opacity: state.style.opacity,
                             size: state.style.size,
+                            // Per *batch*, not per layer: the radius is a
+                            // property of the class, so `draw` overrides this
+                            // from the batch it is about to draw.
+                            world_radius: 0.0,
                             color_by_value: false,
                             value_range: [0.0, 1.0],
                             // Rings, so a point marks a spot without hiding it.
@@ -471,6 +475,9 @@ impl App {
                         color: state.style.color,
                         opacity: state.style.opacity,
                         size: state.style.size,
+                        // A detection is a marker, not a measurement of extent:
+                        // it stays a fixed size on screen.
+                        world_radius: 0.0,
                         color_by_value: state.color_by.is_some(),
                         value_range: state
                             .color_by

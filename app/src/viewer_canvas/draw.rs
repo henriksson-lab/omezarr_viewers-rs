@@ -8,12 +8,13 @@ use web_sys::HtmlCanvasElement;
 use yew::prelude::*;
 
 use crate::webgl::renderer::{
-    FillRenderInfo, LineRenderInfo, PointRenderInfo, TextureKind, TilePlacement, TileTexture,
+    FillRenderInfo, LineRenderInfo, PointRenderInfo, Renderer, TextureKind, TilePlacement,
+    TileTexture,
 };
 
 use super::{
-    ellipse_path, rect_path, EditKind, Handle, LayerRenderInfo, LayerRenderKind, TileKey, Tool,
-    ViewerCanvas, ViewerCanvasState,
+    ellipse_path, rect_path, AnnotBuffer, EditKind, Handle, LayerRenderInfo, LayerRenderKind,
+    TileKey, Tool, ViewerCanvas, ViewerCanvasState,
 };
 
 impl ViewerCanvas {
@@ -89,11 +90,30 @@ impl ViewerCanvas {
                             ..*lines
                         },
                     );
+                    // Which path this batch's points take, and why. A world
+                    // radius is drawn as a point sprite for as long as the
+                    // device will make one that big — one draw call, and the
+                    // vertex shader derives the size from the camera it is
+                    // already applying. Past `ALIASED_POINT_SIZE_RANGE` a
+                    // sprite is unspecified and in practice clamped, which
+                    // would draw a radius nobody chose; so beyond that the
+                    // circles become real geometry through the line program,
+                    // which has no such ceiling. A screen-space marker never
+                    // takes the geometry path: it has no radius to get wrong.
+                    if batch.radius > 0.0
+                        && !state
+                            .renderer
+                            .point_sprite_fits(&world_placement(), batch.radius)
+                    {
+                        self.draw_pick_circles(state, batch, &world_placement(), lines);
+                        continue;
+                    }
                     state.renderer.draw_points(
                         &batch.points,
                         &world_placement(),
                         &PointRenderInfo {
                             color: batch.color,
+                            world_radius: batch.radius,
                             ..points.clone()
                         },
                     );
@@ -115,6 +135,83 @@ impl ViewerCanvas {
 
         self.draw_draft(state, world, canvas_size);
         self.draw_handles(ctx, state, world, canvas_size);
+    }
+
+    /// One batch's picks as circle *geometry*, for the zooms where a point
+    /// sprite cannot be made large enough.
+    ///
+    /// Built and thrown away each frame, like the draft: at these zooms it is a
+    /// handful of rings, and keeping a permanent buffer of them would mean
+    /// 64 segments per pick sitting in GPU memory for every layer that has a
+    /// radius, most of which never zooms this far.
+    ///
+    /// Only the picks on screen are built. A picked dataset is thousands of
+    /// points, and at the zoom that gets here all but a few are outside the
+    /// canvas — a per-frame loop over the whole set would be paid every frame
+    /// to produce nothing.
+    fn draw_pick_circles(
+        &self,
+        state: &ViewerCanvasState,
+        batch: &AnnotBuffer,
+        placement: &TilePlacement,
+        info: &LineRenderInfo,
+    ) {
+        let scale = Renderer::world_scale(placement);
+        if scale <= 0.0 {
+            return;
+        }
+        let radius = batch.radius;
+        // The world rectangle on screen, inverted from the same transform:
+        // `to_clip` puts world `p` at `(p - size / 2) * scale + pan` screen
+        // pixels from the centre, so the visible span is half a canvas either
+        // side of it. A pick's own radius is the margin: one whose centre is
+        // just off screen still has an arc on it.
+        let half = (placement.canvas_size.0 / 2.0, placement.canvas_size.1 / 2.0);
+        let centre = (placement.image_size.0 / 2.0, placement.image_size.1 / 2.0);
+        let x0 = centre.0 + (-half.0 - placement.pan.0) / scale - radius;
+        let x1 = centre.0 + (half.0 - placement.pan.0) / scale + radius;
+        let y0 = centre.1 + (-half.1 - placement.pan.1) / scale - radius;
+        let y1 = centre.1 + (half.1 - placement.pan.1) / scale + radius;
+
+        // Enough segments that the ring reads as a circle rather than as a
+        // polygon: roughly one every eight screen pixels of circumference,
+        // which is what makes this indistinguishable from the sprite it took
+        // over from.
+        let segments = ((0.8 * radius * scale) as usize).clamp(32, 256);
+        let step = std::f32::consts::TAU / segments as f32;
+
+        let mut vertices: Vec<f32> = Vec::with_capacity(batch.markers.len() * segments * 10);
+        for [x, y, z, selected] in batch.markers.iter().copied() {
+            if x < x0 || x > x1 || y < y0 || y > y1 {
+                continue;
+            }
+            // `z` twice: a point fades by its distance from the slice, so the
+            // ring must use the span the point sprite would have used, not the
+            // shape's z extent, or the two paths disagree about when it fades.
+            let mut previous = (x + radius, y);
+            for step_index in 1..=segments {
+                let angle = step * step_index as f32;
+                let next = (x + radius * angle.cos(), y + radius * angle.sin());
+                vertices.extend_from_slice(&[previous.0, previous.1, z, z, selected]);
+                vertices.extend_from_slice(&[next.0, next.1, z, z, selected]);
+                previous = next;
+            }
+        }
+        if vertices.is_empty() {
+            return;
+        }
+        let Ok(buffer) = state.renderer.upload_lines(&vertices) else {
+            return;
+        };
+        state.renderer.draw_lines(
+            &buffer,
+            placement,
+            &LineRenderInfo {
+                color: batch.color,
+                ..*info
+            },
+        );
+        state.renderer.delete_lines(&buffer);
     }
 
     /// Draw the shape being built right now, over everything else.

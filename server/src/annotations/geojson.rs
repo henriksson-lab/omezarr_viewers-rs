@@ -46,6 +46,12 @@ use serde_json::{json, Map, Value};
 /// The `properties` members this viewer adds beyond QuPath's.
 const Z_EXTENT: &str = "zExtent";
 const T_EXTENT: &str = "tExtent";
+/// The width a stroke covers, in world pixels. See `Annotation::stroke_width`
+/// for why an absent one is a geometric line rather than a zero-width stroke.
+const STROKE_WIDTH: &str = "strokeWidth";
+/// Marks a shape as asserting that everything inside it is annotated. See
+/// `Annotation::dense_region` for why sparse cannot be the only mode.
+const DENSE_REGION: &str = "denseRegion";
 
 /// Parse a `FeatureCollection` — or a bare feature, or an array of them.
 ///
@@ -243,6 +249,17 @@ fn read_properties(properties: &Map<String, Value>, into: &mut Annotation) {
         .get(T_EXTENT)
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
+    // Only a positive, finite width is a stroke. A zero or a NaN in the file is
+    // a line that says nothing about area, which is exactly what `None` means,
+    // so it is not carried through as a width nobody can rasterise.
+    into.dense_region = properties
+        .get(DENSE_REGION)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    into.stroke_width = properties
+        .get(STROKE_WIDTH)
+        .and_then(Value::as_f64)
+        .filter(|w| w.is_finite() && *w > 0.0);
 }
 
 /// `[r, g, b]` or `[r, g, b, a]`; the alpha is dropped, since nothing here
@@ -325,6 +342,12 @@ fn write_feature(annotation: &Annotation, all: &[Annotation]) -> Result<Value> {
     }
     if let Some([r, g, b]) = annotation.color {
         properties.insert("color".into(), json!([r, g, b]));
+    }
+    if let Some(width) = annotation.stroke_width {
+        properties.insert(STROKE_WIDTH.into(), json!(width));
+    }
+    if annotation.dense_region {
+        properties.insert(DENSE_REGION.into(), json!(true));
     }
     if !annotation.label.is_empty() {
         let mut classification = Map::new();
@@ -473,7 +496,60 @@ fn attributes() -> serde_json::Value {
         },
         // Ours, and a deviation from both QuPath and OME-XML, which give a shape
         // exactly one plane. Declared so a reader is told rather than surprised.
-        "extensions": ["zExtent", "tExtent"],
+        "extensions": ["zExtent", "tExtent", "strokeWidth", "denseRegion"],
+        // How to read the pixels a shape does *not* cover. Sparse is the safe
+        // default: a scribble asserts something about the pixels within its own
+        // width and nothing about any other, so an uncovered pixel is
+        // unexamined rather than background. Inside a shape marked
+        // `denseRegion` that flips — there, uncovered means background, because
+        // the curator has said they marked every instance in it.
+        //
+        // A trainer needs this to exist. Without it, sparse annotation read as
+        // dense teaches that every unmarked object is background, which is
+        // worse training data than none.
+        "supervision": {
+            "default": "sparse",
+            "dense_within": "denseRegion",
+        },
+        // What a stored shape means in pixels, so that two rasterisers agree.
+        // Left undeclared, "a stroke of width 11" is an intention rather than a
+        // set of voxels, and two curators' work stops being comparable at the
+        // last step.
+        //
+        // The supersample-and-threshold rule is ilastik's, which resolves the
+        // same question the same way for the same reason: an edge pixel is in or
+        // out, and antialiasing has to be resolved somewhere.
+        "rasterisation": {
+            "stroke": "pixels within strokeWidth/2 of the path",
+            "cap": "round",
+            "join": "round",
+            "region": "even-odd over the rings; ring 0 is the exterior",
+            "sampling": "4x4 subsamples per pixel, on at 7 of 16 or more",
+            // Where a pixel *is*. Writing the rule without this leaves half a
+            // voxel of freedom on every axis, which is the whole disagreement
+            // the block exists to prevent. The integer is the centre because
+            // this viewer routes a vertex to a voxel by rounding, and rounding
+            // is the map to the nearest sample; on a corner convention the
+            // containing pixel would be a floor and the key would name the
+            // wrong voxel for half of every axis.
+            "pixel_centre": "the integer coordinate",
+            // `sampling` governs the stroke as well as the region. The two
+            // agree wherever it matters — a straight stroke selects
+            // 2*floor(h)+1 rows under a centre test and 2*floor(h+1/16*2)+1
+            // under sixteen subsamples, which is the same for every stroke
+            // width whose half has a fractional part below 7/8.
+            "sampling_applies_to": ["stroke", "region"],
+            // A closed ring with a width is both: filled, and its outline
+            // fattened. At zero width that degrades to a plain fill. An open
+            // path with no width covers nothing and is refused rather than
+            // written as an empty shape.
+            "fill_and_stroke": "union",
+            // Where two shapes cover one voxel, the higher `shape` wins. An
+            // order-free rule, because the alternative is that the answer
+            // depends on the order blocks happened to be gathered in.
+            "collision": "highest shape id",
+            "level": 0,
+        },
         "written_by": concat!("omezarr-viewer ", env!("CARGO_PKG_VERSION")),
     })
 }
@@ -890,6 +966,56 @@ mod tests {
         );
         let children = feature["properties"]["childObjects"].as_array().unwrap();
         assert_eq!(children[0]["properties"]["objectType"], "detection");
+    }
+
+    #[test]
+    fn a_stroke_carries_its_width_and_a_bare_line_carries_none() {
+        // The distinction this pins is the whole point of storing a width: a
+        // `LineString` with no width is a mathematical curve covering no pixels,
+        // and the same path with a width is a scribble covering a capsule. A
+        // reader that collapsed the two would turn "I painted here" into "I drew
+        // an infinitely thin line", which asserts nothing about any pixel.
+        let scribble = Annotation {
+            geometry: Geometry::LineString(vec![[0.0, 0.0], [10.0, 4.0]]),
+            stroke_width: Some(11.0),
+            ..Default::default()
+        };
+        let bare = Annotation {
+            geometry: Geometry::LineString(vec![[0.0, 0.0], [10.0, 4.0]]),
+            ..Default::default()
+        };
+        let written = write(&[scribble.clone(), bare.clone()]).unwrap();
+        let value: Value = serde_json::from_slice(&written).unwrap();
+        assert_eq!(value["features"][0]["properties"]["strokeWidth"], 11.0);
+        assert!(
+            value["features"][1]["properties"]
+                .get("strokeWidth")
+                .is_none(),
+            "a line with no width writes no member, rather than a zero that reads\
+             back as a stroke covering nothing"
+        );
+
+        let back = parse(&written).unwrap();
+        assert_eq!(back[0].stroke_width, Some(11.0));
+        assert_eq!(back[1].stroke_width, None);
+    }
+
+    #[test]
+    fn a_width_that_cannot_be_rasterised_is_not_a_width() {
+        // Zero and negative reach us from files this viewer did not write, and
+        // each is a line rather than a stroke: there is no set of pixels within
+        // `w / 2` of the path for either. Non-finite is not tested because JSON
+        // cannot express one — `NaN` and `Infinity` are not JSON numbers, so a
+        // width that survives parsing is already finite.
+        for bad in [json!(0), json!(-3.5)] {
+            let feature = json!({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": [[0, 0], [5, 5]]},
+                "properties": {"strokeWidth": bad},
+            });
+            let back = parse(feature.to_string().as_bytes()).unwrap();
+            assert_eq!(back[0].stroke_width, None, "width {bad} is not a stroke");
+        }
     }
 
     #[test]

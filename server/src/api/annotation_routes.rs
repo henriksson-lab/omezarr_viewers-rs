@@ -177,6 +177,19 @@ pub struct SaveAnnotations {
 /// so it can *read* a bucket must not silently become write access to it: the
 /// operator who configured the profile said "show me this", not "change this",
 /// and only they can say otherwise.
+/// Remember where a layer last saved, so an argument-less save goes back there.
+///
+/// Beside every successful write rather than inside one branch: a save path that
+/// forgot it would leave the set looking unsaved and send the next save
+/// somewhere else. Both forms — the GeoJSON set and the ROI table — record it
+/// the same way.
+async fn record_target(data: &web::Data<AppState>, layer: &str, written: &str) {
+    let mut session = data.session.write().await;
+    if let Some(set) = session.annotations_mut(layer) {
+        set.set_target(written.to_string());
+    }
+}
+
 #[post("/api/annotations/{layer}/save")]
 pub async fn save_annotations(
     data: web::Data<AppState>,
@@ -247,10 +260,7 @@ pub async fn save_annotations(
         return match written {
             Ok(written) => {
                 log::info!("wrote {} annotation(s) to {written}", rows.len());
-                let mut session = data.session.write().await;
-                if let Some(set) = session.annotations_mut(&layer) {
-                    set.set_target(written.clone());
-                }
+                record_target(&data, &layer, &written).await;
                 HttpResponse::Ok().json(serde_json::json!({
                     "target": written,
                     "rows": rows.len(),
@@ -307,10 +317,7 @@ pub async fn save_annotations(
         rows.len()
     );
 
-    let mut session = data.session.write().await;
-    if let Some(set) = session.annotations_mut(&layer) {
-        set.set_target(written.clone());
-    }
+    record_target(&data, &layer, &written).await;
     HttpResponse::Ok().json(serde_json::json!({
         "target": written,
         "rows": rows.len(),

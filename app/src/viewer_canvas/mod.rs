@@ -94,7 +94,13 @@ impl Tool {
 /// One colour's worth of an annotation layer, on the GPU.
 pub struct AnnotBuffer {
     pub color: [f32; 3],
+    /// The world radius its points draw at, or 0 for a screen-space marker.
+    pub radius: f32,
     pub points: PointBuffer,
+    /// Where each point is, on the CPU, for the frames a world radius has
+    /// outgrown the point-sprite cap and the circles are built as geometry.
+    /// Empty unless `radius > 0`.
+    pub markers: Vec<[f32; 4]>,
     pub lines: LineBuffer,
     pub fills: FillBuffer,
 }

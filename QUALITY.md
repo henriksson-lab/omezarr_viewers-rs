@@ -481,3 +481,45 @@ detector had been reporting are gone, and a new visual setting is one edit.
 rounds. 288 Rust tests, 76 browser assertions on **both** Chrome 104 and Chrome
 152, clippy and fmt clean.
 
+---
+
+## 12. The last of it
+
+Switching from a line-window detector to a **function-level** one — identical
+bodies, anywhere in the workspace — found what the window detector had been
+splitting across several small hits.
+
+- [x] **`project` (31 lines) and `f32_bytes` (7) were byte-for-byte identical**
+      in `zarr_reader.rs` and `npy_volume.rs`. Now `server/src/pixels.rs`. The
+      readers genuinely differ — one walks zarr chunks, the other a
+      memory-mapped `.npy` — but by the time they hold `&[f32]` they are doing
+      the same thing, and a z-projection that drifted between them would show as
+      one layer kind projecting differently from another.
+- [x] **`record_target`** in `annotation_routes.rs` — the "remember where this
+      layer saved to" step, beside both successful writes. Same argument as
+      `store_edit`: a save path that forgot it would leave the set looking
+      unsaved and send the next save somewhere else. The response JSON stays per
+      branch, because the two forms genuinely report different things.
+
+**There are now zero identical functions across files**, and 16 line-windows
+left, all of which have been read: fixture construction inside
+`roi_table/tests.rs`, the deliberately-inline `fortran_order` header, function
+*signatures* sharing parameter lists, and handler preambles already served by
+`resolve_store` and its siblings.
+
+**This is the point to stop.** Four rounds took duplication from 71 windows to
+16, and the last round's two finds were 38 lines. What remains costs more to
+remove than it costs to keep — the pattern across all four rounds is that
+extracting a small clone adds a struct and a doc comment, so `zarr_reader.rs`,
+`app/src/controls/` and others each ended *larger*. That is the right trade for
+a rule that must not drift, and the wrong one for four lines of scaffolding.
+
+The real remaining debt is not duplication:
+
+- [ ] `src/annotation.rs` (1017 lines) and `server/src/annotations/geojson.rs`
+      (990) are the largest files and are unsplit. `api.rs` was safe to split
+      because 124 tests held it; neither of these has that, and `geojson.rs`
+      parses untrusted files.
+- [ ] The parsers are still unfuzzed — the item task 5 deferred, whose
+      precondition (a stable home for them) has been met since.
+

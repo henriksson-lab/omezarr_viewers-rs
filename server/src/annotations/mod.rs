@@ -27,6 +27,7 @@
 //! `*_micrometer` columns, through a `WorldScale` taken from the store's own
 //! `coordinateTransformations`.
 
+pub mod fragments;
 pub mod geojson;
 pub mod roi_table;
 

@@ -12,6 +12,18 @@ and YOLO detections among them), but it imposes no format of its own: it reads
 what those pipelines already write. `PLAN.md` records the design and what is
 built.
 
+![The viewer: a label volume over an image, with classed annotations over both](docs/viewer.png)
+
+*An image layer with a label volume over it, and hand-drawn annotations in four
+classes — a polygon, three points, an ellipse and a rectangle — with the class
+carrying the colour. The demo store is synthetic, so every value in it is known
+by arithmetic.*
+
+`make screenshot` regenerates this from `tools/screenshot.py`, which builds the
+demo store, drives a real browser and draws the scene. It is a script rather
+than a picture somebody once took, because a screenshot that has drifted from
+the software is worse than none.
+
 ## What it shows
 
 | Layer kind | Read from |
@@ -196,6 +208,42 @@ than what it cannot yet do.
   from an `s3://` or `http(s)://` store because each is one payload key to
   fetch; AnnData is a group of arrays, and the reader that walks them is the
   synchronous one. `read_async` says so rather than failing obscurely.
+
+### Annotation for training
+
+- **A stroke's width is stored, not its pixels.** A `LineString` with a
+  `strokeWidth` is a scribble covering the pixels within half that width of the
+  path; one without is a geometric line covering none. Storing the path defers
+  rasterisation to whoever trains, at the level they train at — a mask
+  rasterised at a downsampled level and scaled back up teaches a
+  boundary-regressing model to reproduce the staircase.
+- **`denseRegion` says where "unlabelled" means background.** Sparse is the
+  default: a scribble asserts something about the pixels it covers and nothing
+  about any other. Inside a shape marked dense, uncovered means background,
+  because the curator has said they marked every instance in it. A trainer that
+  reads sparse annotation as dense learns that every unmarked object is
+  background, which is worse than no training data.
+- **The rasterisation rule is declared in the group attributes**, so two
+  rasterisers agree: round caps and joins, even-odd over the rings, 4x4
+  subsamples per pixel at 7 of 16, level 0. Left unstated, "a stroke of width
+  11" is an intention rather than a set of voxels.
+- **Objects in a label image are classed by clicking them.** Set a class, click
+  an instance, and it takes it; the label image is never modified. Three states
+  are kept apart on purpose — an id nobody has looked at, an id looked at and
+  found to be nothing in particular, and an id with a class — because collapsing
+  the first two makes "I have not started" read as "none of these are cells".
+  Colouring the ids by class is the feedback loop: it shows what is left without
+  reading a list.
+- **A class per label id is written as a feature table.** A segmented object has
+  no geometry here — it is an id in a raster somebody else produced — so its
+  class travels in a table joined by that id, which is what `region` and
+  `instance_key` are for. This is the cheap half of annotation for training: the
+  instances already exist, so it is a table write with no brush, no
+  rasterisation and nothing to resample. An id with no row has not been looked
+  at; an id with an empty class has been, and was nothing in particular.
+- **Nothing writes a label image yet.** The rasteriser is a `blockflow` op; this
+  side writes the geometry and the rules, as a `blockflow` table blob of one row
+  per vertex.
 
 ### Annotation round trips
 

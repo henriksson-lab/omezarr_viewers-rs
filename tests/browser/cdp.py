@@ -276,6 +276,19 @@ class Browser:
         )
         time.sleep(settle)
 
+    def wheel(self, x, y, delta_y, settle=0.6):
+        """A scroll at `(x, y)`. The canvas zooms about the pointer."""
+        self.send(
+            "Input.dispatchMouseEvent",
+            type="mouseWheel",
+            x=x,
+            y=y,
+            deltaX=0,
+            deltaY=delta_y,
+            pointerType="mouse",
+        )
+        time.sleep(settle)
+
     # -- output --------------------------------------------------------------
 
     def screenshot(self, path):

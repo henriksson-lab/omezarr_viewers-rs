@@ -4,10 +4,12 @@ use serde::{de::DeserializeOwned, Serialize};
 use wasm_bindgen::JsCast;
 
 mod annotations;
+mod labels;
 mod objects;
 mod tiles;
 
 pub use annotations::*;
+pub use labels::*;
 pub use objects::*;
 pub use tiles::*;
 

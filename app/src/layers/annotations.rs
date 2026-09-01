@@ -4,6 +4,8 @@
 //! one draw call per colour rather than one per shape, and points, outlines and
 //! fills go to separate buffers because each is a different shader program.
 
+use std::collections::HashMap;
+
 use omezarr_viewer_common::{Annotation, Geometry, ObjectType};
 
 use super::LayerStyle;
@@ -23,6 +25,24 @@ pub struct AnnotUiState {
     pub style: LayerStyle,
     /// Colour each shape by its class instead of by `color`.
     pub color_by_class: bool,
+    /// Size points by a radius in *world* pixels rather than by `style.size` in
+    /// screen pixels.
+    ///
+    /// Off by default, which keeps a plain point annotation the marker it has
+    /// always been. On, a point is a **pick**: a circle whose size is a claim
+    /// about the image, so it grows and shrinks with the zoom and the question
+    /// "does this enclose the particle" has the same answer at every zoom.
+    pub world_radius: bool,
+    /// The radius a class with no radius of its own draws at, in world pixels.
+    pub radius: f32,
+    /// The radius per class, where one has been set.
+    ///
+    /// Per class because that is the granularity the fact has: in cryo-EM a
+    /// dataset has one box size per particle type, so a radius per shape would
+    /// be a thousand copies of one number and a thousand chances to disagree
+    /// with it. Stored rather than derived — unlike `class_color`, which can be
+    /// hashed from the name, a box size is something only the annotator knows.
+    pub class_radii: HashMap<String, f32>,
     /// Fill regions as well as outlining them, as QuPath's "Fill annotations"
     /// does. Off by default, which is QuPath's default too: a fill hides the
     /// pixels the shape was drawn around.
@@ -70,6 +90,9 @@ impl AnnotUiState {
                 slab: 8.0,
             },
             color_by_class: false,
+            world_radius: false,
+            radius: 20.0,
+            class_radii: HashMap::new(),
             filled: false,
             selected: None,
             class: String::new(),
@@ -90,6 +113,9 @@ impl AnnotUiState {
     pub fn keep_view_of(&mut self, old: &Self) {
         self.style = old.style;
         self.color_by_class = old.color_by_class;
+        self.world_radius = old.world_radius;
+        self.radius = old.radius;
+        self.class_radii = old.class_radii.clone();
         self.filled = old.filled;
         self.class = old.class.clone();
         self.object_type = old.object_type;
@@ -159,23 +185,56 @@ impl AnnotUiState {
         if !self.color_by_class || class.is_empty() {
             return self.style.color;
         }
-        let mut hash: u32 = 2166136261;
-        for byte in class.as_bytes() {
-            hash ^= *byte as u32;
-            hash = hash.wrapping_mul(16777619);
-        }
-        hsv_to_rgb(
-            (hash >> 8 & 1023) as f32 / 1023.0,
-            0.55 + (hash >> 18 & 63) as f32 / 63.0 * 0.35,
-            0.75 + (hash >> 24 & 63) as f32 / 63.0 * 0.25,
-        )
+        super::class_color(class)
     }
 
-    /// The shapes to draw, grouped into one batch per colour.
+    /// The world radius a *class*'s points draw at, or 0 while the layer sizes
+    /// its markers in screen pixels.
+    ///
+    /// The class's own radius, then the layer's default — the same fallback
+    /// `class_color` makes, and for the same reason: most layers hold one kind
+    /// of thing and should not have to say so once per class.
+    pub fn class_radius(&self, class: &str) -> f32 {
+        if !self.world_radius {
+            return 0.0;
+        }
+        self.class_radii
+            .get(class)
+            .copied()
+            .unwrap_or(self.radius)
+            .max(0.0)
+    }
+
+    /// The radius the *next* shape drawn here would get — what the control
+    /// shows, and what it edits.
+    pub fn current_radius(&self) -> f32 {
+        self.class_radii
+            .get(&self.class)
+            .copied()
+            .unwrap_or(self.radius)
+    }
+
+    /// Set the radius for the class new shapes get, or the layer's default when
+    /// no class is named.
+    ///
+    /// One control, two destinations, decided by the class box beside it: with
+    /// a particle type named it is that type's box size, with none it is what
+    /// every unnamed class falls back to.
+    pub fn set_radius(&mut self, radius: f32) {
+        if self.class.is_empty() {
+            self.radius = radius;
+        } else {
+            self.class_radii.insert(self.class.clone(), radius);
+        }
+    }
+
+    /// The shapes to draw, grouped into one batch per colour *and radius*.
     ///
     /// One draw call per colour rather than a per-vertex colour attribute: the
     /// colour count is what a person typed, and the point program is shared with
-    /// object layers, which supply no such attribute.
+    /// object layers, which supply no such attribute. The radius joins the key
+    /// for the same reason — it is a uniform, not an attribute — and costs
+    /// nothing while a layer has one radius, which is the usual case.
     pub fn batches(&self, z: i32, t: i32) -> Vec<AnnotBatch> {
         let mut batches: Vec<AnnotBatch> = Vec::new();
         for item in &self.annotations {
@@ -183,12 +242,18 @@ impl AnnotUiState {
                 continue;
             }
             let color = self.color_of(item);
-            let batch = match batches.iter_mut().find(|b| b.color == color) {
+            let radius = self.class_radius(&item.label);
+            let batch = match batches
+                .iter_mut()
+                .find(|b| b.color == color && b.radius == radius)
+            {
                 Some(batch) => batch,
                 None => {
                     batches.push(AnnotBatch {
                         color,
+                        radius,
                         points: Vec::new(),
+                        markers: Vec::new(),
                         lines: Vec::new(),
                         fills: Vec::new(),
                     });
@@ -205,8 +270,17 @@ impl AnnotUiState {
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct AnnotBatch {
     pub color: [f32; 3],
+    /// The world radius these points draw at, or 0 for a screen-space marker.
+    pub radius: f32,
     /// Interleaved `(z, y, x, value, row)`, for the point program.
     pub points: Vec<f32>,
+    /// The same points as `(x, y, z, selected)`, kept on the CPU.
+    ///
+    /// Only filled when `radius > 0`. It is what a circle is built from on the
+    /// frames where the radius has outgrown the device's point-sprite cap and
+    /// the ring has to be drawn as real geometry instead — which needs the
+    /// positions, and the GPU buffer above cannot be read back.
+    pub markers: Vec<[f32; 4]>,
     /// Interleaved `(x, y, z0, z1, selected)`, for the line program.
     pub lines: Vec<f32>,
     /// Interleaved `(x, y, z0, z1)`, three vertices per triangle.
@@ -224,6 +298,9 @@ impl AnnotBatch {
         for [x, y] in item.geometry.markers() {
             self.points
                 .extend_from_slice(&[z0, y as f32, x as f32, 0.0, item.id as f32]);
+            if self.radius > 0.0 {
+                self.markers.push([x as f32, y as f32, z0, flag]);
+            }
         }
         // Every ring and line becomes segments. `GL_LINE_LOOP` would need one
         // draw call per shape, which is the whole reason a colour is one buffer.
@@ -293,21 +370,6 @@ fn triangulate(geometry: &Geometry) -> Vec<[[f64; 2]; 3]> {
         }
     }
     out
-}
-
-/// The label shader's `id_color`, on the CPU, for class colours.
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
-    let i = (h * 6.0).floor();
-    let f = h * 6.0 - i;
-    let (p, q, t) = (v * (1.0 - s), v * (1.0 - f * s), v * (1.0 - (1.0 - f) * s));
-    match (i as i32).rem_euclid(6) {
-        0 => [v, t, p],
-        1 => [q, v, p],
-        2 => [p, v, t],
-        3 => [p, q, v],
-        4 => [t, p, v],
-        _ => [v, p, q],
-    }
 }
 
 #[cfg(test)]
@@ -496,6 +558,95 @@ mod tests {
         assert_ne!(first.class_color("vessel"), first.class_color("cell"));
         // The unclassified take the layer's own colour, whatever it is.
         assert_eq!(first.class_color(""), first.style.color);
+    }
+
+    // -- radius --------------------------------------------------------------
+
+    #[test]
+    fn a_screen_space_layer_has_no_radius_at_all() {
+        // The old behaviour is the default: a point is a marker until somebody
+        // says it is a pick.
+        let ui = state(vec![shape(1, Geometry::Point([1.0, 1.0]), "cell")]);
+        assert_eq!(ui.class_radius("cell"), 0.0);
+        let batches = ui.batches(0, 0);
+        assert_eq!(batches[0].radius, 0.0);
+        assert!(
+            batches[0].markers.is_empty(),
+            "nothing to build a ring from"
+        );
+    }
+
+    #[test]
+    fn a_class_takes_its_own_radius_and_otherwise_the_layers() {
+        let mut ui = state(vec![
+            shape(1, Geometry::Point([1.0, 1.0]), "ribosome"),
+            shape(2, Geometry::Point([2.0, 2.0]), "proteasome"),
+        ]);
+        ui.world_radius = true;
+        ui.radius = 20.0;
+        ui.class_radii.insert("ribosome".into(), 75.0);
+        assert_eq!(ui.class_radius("ribosome"), 75.0);
+        assert_eq!(ui.class_radius("proteasome"), 20.0, "the layer's default");
+        assert_eq!(ui.class_radius(""), 20.0);
+    }
+
+    #[test]
+    fn two_radii_are_two_batches_even_in_one_colour() {
+        // The radius is a uniform, not a vertex attribute, so it splits the
+        // draw the same way the colour does.
+        let mut ui = state(vec![
+            shape(1, Geometry::Point([1.0, 1.0]), "ribosome"),
+            shape(2, Geometry::Point([2.0, 2.0]), "proteasome"),
+        ]);
+        ui.world_radius = true;
+        assert_eq!(ui.batches(0, 0).len(), 1, "one radius, one batch");
+        ui.class_radii.insert("ribosome".into(), 75.0);
+        let batches = ui.batches(0, 0);
+        assert_eq!(batches.len(), 2);
+        assert!(batches.iter().any(|b| b.radius == 75.0));
+        assert!(batches.iter().all(|b| b.color == batches[0].color));
+    }
+
+    #[test]
+    fn a_pick_keeps_its_position_on_the_cpu_for_the_geometry_path() {
+        // The circle drawn past the point-sprite cap is built from these; the
+        // GPU buffer beside them cannot be read back.
+        let mut ui = state(vec![shape(1, Geometry::Point([3.0, 4.0]), "cell")]);
+        ui.world_radius = true;
+        let batches = ui.batches(0, 0);
+        assert_eq!(batches[0].markers, vec![[3.0, 4.0, 0.0, 0.0]]);
+        ui.selected = Some(1);
+        assert_eq!(ui.batches(0, 0)[0].markers[0][3], 1.0, "selected travels");
+    }
+
+    #[test]
+    fn the_radius_control_edits_the_class_in_the_box_or_the_default() {
+        let mut ui = state(vec![]);
+        ui.world_radius = true;
+        ui.set_radius(30.0);
+        assert_eq!(ui.radius, 30.0, "no class named: the layer's default");
+        assert!(ui.class_radii.is_empty());
+
+        ui.class = "ribosome".into();
+        ui.set_radius(75.0);
+        assert_eq!(ui.radius, 30.0, "the default is left alone");
+        assert_eq!(ui.current_radius(), 75.0);
+        assert_eq!(ui.class_radius("proteasome"), 30.0);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_radii_the_panel_was_set_to() {
+        // An annotation layer's rows arrive with the session and its style does
+        // not; a radius lost on every reload is a box size retyped every time.
+        let mut old = state(vec![]);
+        old.world_radius = true;
+        old.radius = 30.0;
+        old.class_radii.insert("ribosome".into(), 75.0);
+        let mut fresh = state(vec![shape(1, Geometry::Point([1.0, 1.0]), "ribosome")]);
+        fresh.keep_view_of(&old);
+        assert!(fresh.world_radius);
+        assert_eq!(fresh.class_radius("ribosome"), 75.0);
+        assert_eq!(fresh.class_radius("other"), 30.0);
     }
 
     #[test]
