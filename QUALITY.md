@@ -73,31 +73,45 @@ rather than on status codes, headers, or anything the UI never calls.
       depth`, `index + 1`, `offset + limit`) and `zarr_reader.rs::z_range`, which
       the regression test found *after* the first three were fixed.
 
-### Still open, found by these tests
+### Found by these tests — all now closed
 
-Each is real and none is fixed; each is a judgement call about what the API
-should promise rather than a defect with one obvious answer.
+Each was real, and each was a judgement call about what the API should promise
+rather than a defect with one obvious answer. The two marked by task 8 were
+fixed then; the four remaining were fixed by task 13.
 
 - [x] **An out-of-range `level` is a 500 from `/api/tile` and `/api/value` but a
       400 from `/api/slice`.** Fixed by task 8: all three validate the level
       before reading, and `a_level_outside_the_dataset_is_a_400_from_every_pixel_route`
       sweeps all three.
-- [ ] **An out-of-range channel returns 200 and a black tile.** `c=9` on a
+- [x] **An out-of-range channel returns 200 and a black tile.** `c=9` on a
       2-channel image comes back as fill-value pixels, indistinguishable from
       data that is genuinely black, because zarrs pads the out-of-bounds subset.
       An overhanging y/x tile has a reason to pad; a nonexistent channel has none.
-- [ ] **An unknown `columns=` name is silently dropped** (`api.rs`, the
+      Fixed by task 13: `check_channel` beside `check_level`, on all three pixel
+      routes. A volume with **no `c` axis is exempt** — the index names nothing
+      there, exactly as `t` already did — because refusing would 400 every tile
+      of an ordinary `(z,y,x)` OME-Zarr.
+- [x] **An unknown `columns=` name is silently dropped** (`api.rs`, the
       `filter_map` over requested column names). The client indexes the returned
       planes positionally, so a typo or a server-side rename shifts every later
       column's meaning instead of erroring — the numbers arrive under the wrong
-      labels.
-- [ ] **`POST /api/project` clears the session before opening the new one**, and
+      labels. Fixed by task 13: **refused**, not reported. The ROI-table
+      precedent reports because that save is still correct, merely lossy; this
+      one is not correct, and a header saying so only helps a client that
+      thought to read it.
+- [x] **`POST /api/project` clears the session before opening the new one**, and
       answers 200 with an empty layer list when every layer fails. The user is
       left with nothing and the client gets no signal. `POST /api/open`
-      validates first; `open_project` does not.
-- [ ] **`/api/tables/{layer}/column` returns the same 400 and the same message**
+      validates first; `open_project` does not. Fixed by task 13: open
+      alongside, then drop. A *partial* open is still a success with
+      `X-Skipped`; opening nothing out of something asked for is a 400 and the
+      old session is left standing.
+- [x] **`/api/tables/{layer}/column` returns the same 400 and the same message**
       for a column that does not exist and one that is text, so a client cannot
-      tell a typo from a type mismatch.
+      tell a typo from a type mismatch. Fixed by task 13: 404 names it and lists
+      the columns there are, 400 says what it lacks — the section-7 taxonomy one
+      level down. 404 means "your column list is stale", 400 means "that column
+      can never colour anything".
 - [x] **Naming a pixel-less layer is 400 from `/tile` and `/slice` but 404 from
       `/value`**, and a 404 from `/objects` does not distinguish "no such layer"
       from "that layer has no objects". Fixed by task 8: unknown id is 404 and
@@ -516,10 +530,167 @@ a rule that must not drift, and the wrong one for four lines of scaffolding.
 
 The real remaining debt is not duplication:
 
-- [ ] `src/annotation.rs` (1017 lines) and `server/src/annotations/geojson.rs`
-      (990) are the largest files and are unsplit. `api.rs` was safe to split
-      because 124 tests held it; neither of these has that, and `geojson.rs`
-      parses untrusted files.
+- [x] `server/src/annotations/geojson.rs` (1116 by the time it was done — it had
+      grown to 1116 from 990 while the supervision work went in) is split; see
+      task 14. `src/annotation.rs` (1049) is still unsplit.
 - [ ] The parsers are still unfuzzed — the item task 5 deferred, whose
       precondition (a stable home for them) has been met since.
 
+
+---
+
+## 13. Supervision, the plane cache, and a bug only two repositories together could show
+
+Four strands, three of them in parallel.
+
+### The API's last four open findings
+
+All four from section 7 are closed, above. The pattern in the fixes is one
+choice made four times: **an ambiguous success is worse than a refusal**, except
+where the operation really did succeed. So a nonexistent channel is a 400, an
+unknown column name is a 400, a project that opens *some* layers is a 200 with
+`X-Skipped`, and a typo is told apart from a type mismatch by status code rather
+than by prose.
+
+### Stroke width and dense region have controls, and are drawn
+
+The two fields added for partial supervision were storage-only: reachable over
+the API, invisible in the viewer. Both now have controls, both are drawn, and
+the layer's supervision state is stated in words — *"No dense region: every
+pixel nothing covers is unexamined."*
+
+The drawing is the part that needed care. A stroke is a claim about **pixels**,
+so the band is real geometry in world coordinates rather than a wider line:
+`lineWidth` above 1 is not portable in WebGL2 and is screen-space where it works
+at all, and a scribble whose apparent width changed with the zoom would be
+showing an assertion nobody made. A dense region is hatched rather than filled,
+because it means something an ordinary region does not and so must not look like
+one.
+
+- [x] **The draft shape was a bare centreline** — the band appeared on mouse-up,
+      so the shape you were about to get was not the shape you could see. The
+      canvas now takes a `draft_stroke_width` prop, resolved by the app from the
+      same two inputs `finish_drawing` uses. The tool→open-path shortcut it
+      needs (there is no geometry yet to ask about) is pinned to `geometry_of`
+      by `a_tool_draws_an_open_path_exactly_when_its_geometry_is_one`, over
+      every `Tool` variant, so the two cannot drift.
+- [x] **Hit-testing grabbed a scribble by its centreline.** `near` is a fixed
+      number of *screen* pixels expressed in world ones, so it shrinks as the
+      view zooms in: a 24-px band at 4x fit is 96 screen pixels wide and only
+      the middle 10 of them answered a shift-click. `grab_reach` takes the
+      larger of the hand's tolerance and half the stroke width — `near` stays
+      the floor, so a band narrower than a hand is steady does not become
+      *harder* to hit than a bare line. The body test uses it too: the bounds
+      are the vertices, and the band stands half its width outside them.
+
+### A plane cache for the ortho panes
+
+Each pane re-fetched its plane on every move. The panes now cache by
+`(layer, axis, level, index, t, channel, transpose)` — `transpose` included
+because the texture is uploaded *after* it, so a plane read for the other
+orientation is a wrong picture rather than a slow one. Pane size is deliberately
+not in the key: it decides the `level`, and the level is in the key.
+
+`TileStore` became generic over its key rather than being copied, and gained one
+rule: **trim never evicts the entry just inserted.** A single plane can be a
+large fraction of a pane's budget where a tile never is (1 MB against 256), and
+a store that instantly forgets what it was handed is worse than one briefly over
+budget by one item.
+
+### The cross-repo golden fixture — which justified itself immediately
+
+Nothing had run the annotation pipeline end to end. The viewer writes fragments;
+`blockflow` rasterises them; each was tested thoroughly against its own idea of
+the format, which is exactly the drift `objects/table.rs` warns about: *"every
+consumer writes its own parser against a layout documented, at best, in the
+producer's header — and the layouts drift, because nothing can compare them."*
+
+`server/tests/fragments_golden.rs` pins a canonical scene — a polygon with a
+hole, an open stroke, a dense rectangle — to committed bytes, and
+`blockflow/tests/viewer_fragments.rs` reads **the same file** and rasterises it.
+
+On its first run it failed, on a real bug neither repository could have found
+alone: the viewer numbered classes from **0**, and the rasteriser reserves 0 for
+*no shape covers this voxel*. Both sides were correct by their own lights and
+the pipeline did not work. Class ids are now one-based, with the reason on the
+field rather than left as a convention.
+
+The fixture is **copied**, not shared through a path: tying two repositories to
+a directory layout neither controls is a worse coupling than a file that has to
+be copied when it deliberately changes, and the test says so when it fails.
+
+### A suite for what only pixels can answer
+
+`tests/browser/suites/supervision.py` — 14 checks. The band is measured at 58px
+against the 57px its 24 world-pixel width asks for, and grows to 92px when the
+image is zoomed, which is the whole claim: the width is a size *in the image*.
+The hatch is measured as a **fraction of the region's area** (4.8%), which
+distinguishes it from a fill; a single probe passed or failed on whether it
+happened to land between hatch lines 26px apart.
+
+It grew to 17 checks with the two items above: the draft measures **58px
+mid-drag against 58px once stored** — the shape you see is the shape you get —
+and a shift-click 9 world px off a scribble's centreline lands on it while one
+24 px off still misses, which is the band being a bound rather than an excuse
+for an unbounded target.
+
+Two measurement traps caught while writing it, both the same shape as earlier
+rounds: a plain before/after around a *draw* also catches the previous shape
+losing its selection highlight, and read 476px for a 57px band; and
+`Viewer.to_screen` is fit-based and blind to zoom, so a scale computed from it
+cannot detect that the camera moved. Both are avoided the way `picking` already
+avoided them — toggle the layer, shoot twice at one camera position.
+
+---
+
+## 14. Splitting `geojson.rs`, along a seam that was already there
+
+The measurement that decided the shape of this: **`parse` and `write` are called
+by nothing outside the file.** All 19 external call sites are store-side —
+`load`, `save`, `save_async`, `split_target`, `is_annotation_target`. The codec
+was already an internal detail with a store facade around it, so the cut follows
+the call graph rather than an idea imposed on it.
+
+1116 lines became four files:
+
+| | lines | what |
+|---|---|---|
+| `geojson/mod.rs` | 259 | the dialect documentation, the four property-name constants, the re-exports, the shared fixtures and the round-trip tests |
+| `geojson/read.rs` | 355 | `parse` and the readers — **the fuzz target's home** |
+| `geojson/store.rs` | 377 | `AnnotationFile`, `attributes()`, target naming, the sync, async and bare-file operations |
+| `geojson/write.rs` | 197 | `write` and `write_feature` |
+
+The total went **up**, 1116 to 1188, and that is the same trade the four
+duplication rounds kept making: the 72 lines are four module headers saying what
+each half is for, four import blocks, and three test scaffolds. The largest file
+anyone now has to hold in their head is 377 lines rather than 1116.
+
+Three decisions worth keeping:
+
+**The round-trip tests went to `mod.rs`, not to either half.** They assert the
+contract *between* read and write — that anything the reader understood survives
+being written and read again, including members nothing here displays. Filed
+under `read` they would read as read tests and could be weakened along with it.
+The two fixtures (`QUPATH`, a real QuPath export, and `square`) are shared for
+the same reason: two divergent copies would let one half be tested against a
+file the other half never sees.
+
+**Sync and async stayed together in `store.rs`.** That is the obvious next cut
+and it is the wrong one: the two paths exist only because zarrs' sync and async
+storage traits are different types no generic unifies, so they have to stay in
+step, and separating them makes drift easier and invisible. Adjacency is doing
+work.
+
+**The store half kept no unit tests**, because it never had any — its behaviour
+is covered end to end by the 18 async tests in `server/tests/annotations.rs`,
+and what matters about a save is that a *session* can read it back.
+
+Verified as a move rather than a rewrite: every function, constant and struct in
+the original is present afterwards, and so is every test, both checked by diffing
+the item lists against `git show HEAD:`. 115/115 browser checks still pass.
+
+- [ ] `src/annotation.rs` (1049) is next, and splits the same way: `geometry.rs`
+      for the `Geometry` algebra and its helpers (~330), `mod.rs` for
+      `Annotation`, `Plane` and `ObjectType` (~260), `hierarchy.rs` for
+      `pick_annotation` / `containing_parent` / `in_tree_order` (~105) — the
+      smallest-covering-shape rule, which is a different idea from the shapes.

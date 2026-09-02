@@ -151,6 +151,42 @@ fn check_level(store: &Volume, id: &str, level: usize) -> Result<(), HttpRespons
         .map_err(|e| bad_level(id, e))
 }
 
+/// How many channels a level has, when the volume has a channel axis at all.
+///
+/// `None` for a volume with no `c` axis — a `(z, y, x)` `.npy`, a plain 2D
+/// image — because the reader ignores the index there: every `c` answers the
+/// same voxels, so there is no such thing as an out-of-range one.
+fn channel_count(store: &Volume, level: usize) -> Option<u64> {
+    // Named `dataset` rather than `info`, which is the name of a route this
+    // module re-exports — an actix macro expands to a struct of the handler's
+    // name, and `info.metadata` would then be read as a field of that struct.
+    let dataset = store.metadata();
+    let at = dataset
+        .metadata
+        .multiscales
+        .first()?
+        .axes
+        .iter()
+        .position(|axis| axis.name == "c")?;
+    dataset.arrays.get(level)?.shape.get(at).copied()
+}
+
+/// Refuse a channel the volume does not have, before a single chunk is read.
+///
+/// Unlike a y/x tile that overhangs the edge of the image, a channel index has
+/// no legitimate out-of-range case: zarrs pads an out-of-bounds subset with the
+/// fill value, so `c=9` on a two-channel image came back 200 and black, which
+/// is exactly what genuinely black data looks like. The caller chose the
+/// number, so it is a 400 like any other value out of range.
+fn check_channel(store: &Volume, id: &str, level: usize, c: u64) -> Result<(), HttpResponse> {
+    match channel_count(store, level) {
+        Some(count) if c >= count => Err(HttpResponse::BadRequest().body(format!(
+            "layer {id}: channel {c} is outside this volume, which has {count} channel(s)"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// The pixels behind `layer=`, and the id they came from.
 ///
 /// The id comes back because it is the tile cache key, and the default layer's

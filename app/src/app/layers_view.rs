@@ -108,6 +108,7 @@ impl App {
                             on_draw={on_draw}
                             editable={self.editable()}
                             on_edit={on_edit}
+                            draft_stroke_width={self.draft_stroke_width()}
                         />
                         { self.view_toolbar(ctx) }
                         if self.ortho {
@@ -376,10 +377,13 @@ impl App {
                     selected={state.selected}
                     class={state.class.clone()}
                     object_type={state.object_type}
+                    stroke_width={state.stroke_width}
                     filter={state.filter.clone()}
                     classes={classes}
                     class_colors={class_colors}
                     shown={shown}
+                    dense={state.dense_count()}
+                    scribbles={state.scribble_count()}
                     save_target={state.save_target.clone()}
                     saving={state.saving}
                     dirty={state.dirty}
@@ -396,7 +400,10 @@ impl App {
                     on_slab={link.callback(move |v| AnnotStyleMsg::Slab(index, v))}
                     on_class={link.callback(move |v| AnnotEditMsg::SetClass(index, v))}
                     on_object_type={link.callback(move |v| AnnotStyleMsg::NewObjectType(index, v))}
+                    on_stroke_width={link.callback(move |v| AnnotStyleMsg::NewStrokeWidth(index, v))}
                     on_name={link.callback(move |v| AnnotEditMsg::SetName(index, v))}
+                    on_selected_stroke={link.callback(move |v| AnnotEditMsg::SetStrokeWidth(index, v))}
+                    on_dense={link.callback(move |v| AnnotEditMsg::SetDense(index, v))}
                     on_selected_type={link.callback(move |v| AnnotEditMsg::SetObjectType(index, v))}
                     on_locked={link.callback(move |v| AnnotEditMsg::SetLocked(index, v))}
                     on_filter={link.callback(move |v| AnnotStyleMsg::Filter(index, v))}

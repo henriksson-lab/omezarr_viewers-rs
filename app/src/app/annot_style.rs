@@ -18,6 +18,9 @@ pub enum AnnotStyleMsg {
     Filled(usize, bool),
     /// The object type new shapes in this layer get.
     NewObjectType(usize, ObjectType),
+    /// The stroke width new *open* paths in this layer get, in world pixels, or
+    /// `None` for a geometric line covering no pixels.
+    NewStrokeWidth(usize, Option<f64>),
     Filter(usize, Option<String>),
     TExtent(usize, f64),
     ZExtent(usize, f64),
@@ -42,6 +45,16 @@ impl App {
             AnnotStyleMsg::NewObjectType(index, kind) => {
                 if let Some(state) = self.annot_mut(index) {
                     state.object_type = kind;
+                }
+                true
+            }
+            AnnotStyleMsg::NewStrokeWidth(index, width) => {
+                // Nothing drawn already changes: this is the width the *next*
+                // open path gets, like the class box beside it. A stroke width
+                // applied retroactively would re-assert coverage over pixels
+                // whoever drew them never claimed.
+                if let Some(state) = self.annot_mut(index) {
+                    state.stroke_width = width.filter(|w| *w > 0.0);
                 }
                 true
             }

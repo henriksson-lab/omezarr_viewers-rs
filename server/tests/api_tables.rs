@@ -260,14 +260,20 @@ async fn the_ids_come_from_the_table_s_instance_key_not_from_a_column_named_labe
 }
 
 #[actix_web::test]
-async fn a_column_that_is_not_there_is_refused() {
+async fn a_column_that_is_not_there_is_a_404_naming_it() {
     let (api, id) = with_feature_table().await;
     let res = api.get(&format!("/api/tables/{id}/column?name=nope")).await;
-    // NOTE: 400, not 404 — the handler answers a missing column and a
-    // non-numeric one with the same status and message. Asserting what it
-    // does; see the report for why this is arguably the wrong code.
-    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
+    // A name nothing answers to, which is the same mistake as an id no layer
+    // has: 404, naming it. It used to be the same 400 and the same sentence a
+    // text column gets, so a client could not tell a typo from a type
+    // mismatch — and the two want opposite fixes.
+    assert_eq!(res.status, 404, "{} {}", res.status, res.text());
     assert!(res.text().contains("nope"), "{}", res.text());
+    assert!(
+        res.text().contains("area"),
+        "the refusal lists the columns there are: {}",
+        res.text()
+    );
 }
 
 #[actix_web::test]
@@ -277,9 +283,31 @@ async fn a_text_column_cannot_colour_a_label_image() {
         .get(&format!("/api/tables/{id}/column?name=cell_type"))
         .await;
     // `cell_type` is a real column, and still not an answer: the endpoint
-    // exists to produce numbers a colour ramp can use.
+    // exists to produce numbers a colour ramp can use. Wrong kind, not missing
+    // — the same rule the layer routes follow — so a 400 saying what it lacks.
     assert_eq!(res.status, 400, "{} {}", res.status, res.text());
     assert!(res.text().contains("cell_type"), "{}", res.text());
+    assert!(res.text().contains("numeric"), "{}", res.text());
+}
+
+#[actix_web::test]
+async fn a_typo_and_a_type_mismatch_are_told_apart_without_reading_the_message() {
+    let (api, id) = with_feature_table().await;
+    // The point of the two statuses: a client can act on them. A 404 means the
+    // column list is stale and should be re-fetched; a 400 means the column is
+    // there and cannot colour anything, so offering it again is the bug.
+    let missing = api.get(&format!("/api/tables/{id}/column?name=nope")).await;
+    let text = api
+        .get(&format!("/api/tables/{id}/column?name=cell_type"))
+        .await;
+    assert_ne!(
+        missing.status,
+        text.status,
+        "both answered {} — {} / {}",
+        missing.status,
+        missing.text(),
+        text.text()
+    );
 }
 
 #[actix_web::test]

@@ -18,7 +18,7 @@ use omezarr_viewer_common::{
 
 use crate::controls::channel_panel;
 
-mod annotations;
+pub(crate) mod annotations;
 mod objects;
 
 pub use annotations::AnnotUiState;

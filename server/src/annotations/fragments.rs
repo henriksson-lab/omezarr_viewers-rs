@@ -38,9 +38,18 @@ use crate::objects::{table, ColumnData, NamedColumn};
 pub struct Fragments {
     pub positions: Vec<[u64; 3]>,
     pub columns: Vec<NamedColumn>,
-    /// Class names, indexed by the `class` column. Names cannot live in a table
-    /// — its columns are numbers — so the mapping travels beside it, in the
-    /// group attributes.
+    /// Class names. **The `class` column is a one-based index into this**, so
+    /// the name for a row's class is `classes[class - 1]`.
+    ///
+    /// One-based because a rasteriser needs a value meaning *no shape covers
+    /// this voxel*, and zero is the only one available: a volume is zeroed
+    /// before anything draws into it. A class rendering as zero would produce
+    /// exactly the volume a shape that never arrived produces — which is why
+    /// `blockflow`'s rasterise op refuses class zero by name rather than
+    /// drawing it.
+    ///
+    /// Names cannot live in a table — its columns are numbers — so the mapping
+    /// travels beside it, in the group attributes.
     pub classes: Vec<String>,
 }
 
@@ -60,11 +69,13 @@ pub fn fragments(annotations: &[Annotation]) -> Fragments {
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
 
     for annotation in annotations {
+        // One-based: zero is reserved for "no shape covers this voxel". See
+        // `Fragments::classes`.
         let class_id = match classes.iter().position(|c| c == &annotation.label) {
-            Some(at) => at,
+            Some(at) => at + 1,
             None => {
                 classes.push(annotation.label.clone());
-                classes.len() - 1
+                classes.len()
             }
         } as u64;
         // Half, because the rasterised set is the pixels within `w / 2` of the
@@ -276,8 +287,18 @@ mod tests {
             ..Default::default()
         };
         let fragments = fragments(&[of("cell"), of("vessel"), of("cell")]);
-        assert_eq!(u64s(&fragments, "class"), vec![0, 1, 0]);
+        // One-based, and never zero: a rasteriser needs zero to mean "nothing
+        // covers this voxel", and a class rendering as zero is indistinguishable
+        // from a shape that never arrived.
+        assert_eq!(u64s(&fragments, "class"), vec![1, 2, 1]);
         assert_eq!(fragments.classes, vec!["cell", "vessel"]);
+        for id in u64s(&fragments, "class") {
+            assert_eq!(
+                fragments.classes[id as usize - 1],
+                if id == 1 { "cell" } else { "vessel" },
+                "the column indexes the names one-based"
+            );
+        }
     }
 
     #[test]

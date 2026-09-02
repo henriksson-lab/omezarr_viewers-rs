@@ -25,7 +25,7 @@ from cdp import ORIGIN_CHECK_FROM, Browser, chrome_version  # noqa: E402
 from harness import Checks, Server, Viewer, binary, demo_store  # noqa: E402
 
 SUITES = ["drawing", "editing", "classes", "hierarchy", "formats", "tables", "picking",
-          "classing", "grid", "caching"]
+          "classing", "grid", "caching", "supervision"]
 
 
 def feature_table(store):

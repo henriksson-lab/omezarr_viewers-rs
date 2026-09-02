@@ -4,7 +4,7 @@ use yew::prelude::*;
 
 use wasm_bindgen_futures::spawn_local;
 
-use omezarr_viewer_common::{Annotation, Plane};
+use omezarr_viewer_common::{Annotation, Geometry, Plane};
 
 use crate::api_client;
 use crate::layers::{AnnotUiState, LayerState, LayerUi};
@@ -264,6 +264,7 @@ impl App {
                 boxlike,
                 puncta: item.is_point(),
                 locked: item.locked,
+                stroke_width: item.stroke_width,
             });
         }
         None
@@ -350,28 +351,61 @@ impl App {
     }
 
     /// Turn a finished gesture into an annotation on the target layer.
+    /// The stroke width the shape being drawn right now will be stored with.
+    ///
+    /// The same two inputs `finish_drawing` uses — the tool and the target
+    /// layer's setting — so the band under the cursor is the band the shape
+    /// will have. `Tool::draws_open_path` stands in for the geometry test that
+    /// `finish_drawing` can make and this cannot, there being no geometry yet.
+    pub(super) fn draft_stroke_width(&self) -> Option<f64> {
+        if !self.tool.draws_open_path() {
+            return None;
+        }
+        let layer = self.annot_target.as_ref()?;
+        self.layers
+            .iter()
+            .find(|l| &l.id == layer)
+            .and_then(|l| match &l.ui {
+                LayerUi::Annotations(state) => state.stroke_width,
+                _ => None,
+            })
+    }
+
     fn finish_drawing(&mut self, ctx: &Context<Self>, drawn: Drawn) -> bool {
         let Some(layer) = self.annot_target.clone() else {
             self.error = Some("no annotation layer to draw into".into());
             return true;
         };
-        let (class, object_type) = self
+        let (class, object_type, stroke_width) = self
             .layers
             .iter()
             .find(|l| l.id == layer)
             .and_then(|l| match &l.ui {
-                LayerUi::Annotations(state) => Some((state.class.clone(), state.object_type)),
+                LayerUi::Annotations(state) => {
+                    Some((state.class.clone(), state.object_type, state.stroke_width))
+                }
                 _ => None,
             })
             .unwrap_or_default();
         let Some((geometry, is_ellipse)) = geometry_of(&drawn) else {
             return false;
         };
+        // Only an *open* path takes the layer's stroke width. A closed region
+        // already says which pixels it means — everything inside its boundary —
+        // and a width on it would be a second, different claim about the band
+        // around that boundary, which is not what the box tool was drawn with.
+        let stroke_width = matches!(
+            geometry,
+            Geometry::LineString(_) | Geometry::MultiLineString(_)
+        )
+        .then_some(stroke_width)
+        .flatten();
         let annotation = Annotation {
             geometry,
             is_ellipse,
             label: class,
             object_type,
+            stroke_width,
             // The plane the shape was drawn on. One plane, not a span:
             // there is no handle for depth in a 2D view, and the panel
             // is where a span gets widened.

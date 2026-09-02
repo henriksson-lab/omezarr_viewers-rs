@@ -15,8 +15,8 @@ use crate::webgl::context::GlContext;
 use crate::webgl::renderer::Renderer;
 
 use super::{
-    camera_world, segment_distance, Camera2d, Drawn, EditKind, Editing, Handle, Tool, ViewerCanvas,
-    ViewerCanvasState, ViewerMsg,
+    camera_world, grab_reach, segment_distance, Camera2d, Drawn, EditKind, Editing, Handle, Tool,
+    ViewerCanvas, ViewerCanvasState, ViewerMsg,
 };
 use super::{TileStore, TILE_BUDGET_BYTES};
 
@@ -537,6 +537,7 @@ impl ViewerCanvas {
             let state = self.state.borrow();
             self.grab_tolerance(state.as_ref()?)
         };
+        let reach = grab_reach(near, editable.stroke_width);
         let editing = |handle, kind| {
             Some(Editing {
                 id: editable.id,
@@ -592,7 +593,7 @@ impl ViewerCanvas {
                     for vertex in 0..path.len() {
                         let a = path[vertex];
                         let b = path[(vertex + 1) % path.len()];
-                        if segment_distance(x, y, a, b) <= near {
+                        if segment_distance(x, y, a, b) <= reach {
                             return editing(
                                 Handle::Vertex(path_index, vertex),
                                 EditKind::InsertVertex,
@@ -604,8 +605,11 @@ impl ViewerCanvas {
             }
         }
 
+        // `reach`, not `near`: the bounds are the *vertices*, and a stroke's
+        // band stands half its width outside them. A click on the visible edge
+        // of a wide scribble is outside the vertex bounds and inside the shape.
         let (x0, y0, x1, y1) = editable.bounds;
-        if x >= x0 - near && x <= x1 + near && y >= y0 - near && y <= y1 + near {
+        if x >= x0 - reach && x <= x1 + reach && y >= y0 - reach && y <= y1 + reach {
             return editing(Handle::Body, EditKind::Drag);
         }
         None

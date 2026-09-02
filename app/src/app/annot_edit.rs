@@ -17,6 +17,12 @@ pub enum AnnotEditMsg {
     SetName(usize, String),
     SetObjectType(usize, ObjectType),
     SetLocked(usize, bool),
+    /// The selected shape's stroke width, in world pixels; `None` makes it a
+    /// geometric line again.
+    SetStrokeWidth(usize, Option<f64>),
+    /// Whether the selected shape asserts that everything inside it is
+    /// annotated.
+    SetDense(usize, bool),
     /// Rebuild a layer's hierarchy from where its shapes now are.
     Renest(usize),
     /// Lift the selected annotation out of its parent.
@@ -58,6 +64,27 @@ impl App {
                     return false;
                 };
                 self.edit_selected(ctx, index, layer, id, move |item| item.locked = locked);
+                true
+            }
+            AnnotEditMsg::SetStrokeWidth(index, width) => {
+                let Some((layer, id)) = self.selected_in(index) else {
+                    return false;
+                };
+                // A width of zero is not stored: `None` is the geometric line,
+                // and two spellings of "covers nothing" would be one too many.
+                let width = width.filter(|w| *w > 0.0);
+                self.edit_selected(ctx, index, layer, id, move |item| {
+                    item.stroke_width = width;
+                });
+                true
+            }
+            AnnotEditMsg::SetDense(index, dense) => {
+                let Some((layer, id)) = self.selected_in(index) else {
+                    return false;
+                };
+                self.edit_selected(ctx, index, layer, id, move |item| {
+                    item.dense_region = dense;
+                });
                 true
             }
             AnnotEditMsg::Renest(index) => self.restructure(ctx, index, true),

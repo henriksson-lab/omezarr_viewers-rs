@@ -15,7 +15,9 @@ use crate::cache::TileKey;
 use crate::ontology::RegionCount;
 use crate::zarr_reader::{PlaneAxis, PlaneRequest, Projection, TileEncoding, TileRequest};
 
-use super::{bad_level, check_level, layer_objects, layer_store, resolve_store, AppState};
+use super::{
+    bad_level, check_channel, check_level, layer_objects, layer_store, resolve_store, AppState,
+};
 
 /// Query parameters for the /api/tile endpoint.
 #[derive(Deserialize)]
@@ -83,6 +85,9 @@ pub async fn tile(data: web::Data<AppState>, query: web::Query<TileQuery>) -> im
     // `anyhow::Error` like any other, and the blanket 500 it used to land in
     // said "come back later" about a level that will never exist.
     if let Err(res) = check_level(&store, &layer_id, q.level) {
+        return res;
+    }
+    if let Err(res) = check_channel(&store, &layer_id, q.level, q.c) {
         return res;
     }
 
@@ -185,6 +190,9 @@ pub async fn slice(data: web::Data<AppState>, query: web::Query<SliceQuery>) -> 
         Ok(shape) => shape,
         Err(e) => return bad_level(&layer_id, e),
     };
+    if let Err(res) = check_channel(&store, &layer_id, q.level, q.c) {
+        return res;
+    }
 
     // Planes are keyed like tiles: the axis rides in the projection slot, which
     // is free for a plane and keeps one cache rather than two.
@@ -273,6 +281,9 @@ pub async fn voxel_value(
         }
     };
     if let Err(res) = check_level(&store, &layer_id, q.level) {
+        return res;
+    }
+    if let Err(res) = check_channel(&store, &layer_id, q.level, q.c) {
         return res;
     }
 

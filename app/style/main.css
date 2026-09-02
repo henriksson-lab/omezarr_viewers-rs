@@ -642,6 +642,43 @@ body {
     color: #fff;
 }
 
+/* A dense region asserts something no other row does — that everything inside
+   it is annotated — so it is marked in the list as well as hatched on the
+   canvas. The cell widens for the mark rather than clipping it. */
+.annot-kind.dense {
+    width: auto;
+    white-space: nowrap;
+}
+
+.annot-dense-mark {
+    margin-left: 2px;
+    color: #ffd166;
+}
+
+/* What this layer says about the pixels nothing covers. Set apart from the
+   plain counts above it because it is the one line that says whether an
+   unlabelled pixel here means background or means unexamined. */
+.annot-supervision {
+    margin: 4px 0;
+    color: #aaa;
+}
+
+.annot-supervision .hint {
+    color: #666;
+}
+
+/* A stroke width is typed, not dragged: it is a number in the image's own
+   pixels that a curator knows, and a slider would only offer a range. */
+.slider-row input[type="number"] {
+    width: 64px;
+    background: #16213e;
+    color: #eee;
+    border: 1px solid #2a2a4e;
+    border-radius: 4px;
+    padding: 3px;
+    font-size: 12px;
+}
+
 /* Unsaved work, and the class key --------------------------------------- */
 
 /* A mark in the layer header, so "there is work here" is visible without

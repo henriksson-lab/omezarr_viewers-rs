@@ -4,9 +4,11 @@
 //! top of everything: a half-drawn shape hidden under an opaque layer is a
 //! shape the hand drawing it cannot see.
 
+use omezarr_viewer_common::Point;
 use web_sys::HtmlCanvasElement;
 use yew::prelude::*;
 
+use crate::layers::annotations::stroke_band;
 use crate::webgl::renderer::{
     FillRenderInfo, LineRenderInfo, PointRenderInfo, Renderer, TextureKind, TilePlacement,
     TileTexture,
@@ -133,6 +135,10 @@ impl ViewerCanvas {
             }
         }
 
+        // The band under the centreline that is drawn over it: a scribble's
+        // width *is* the annotation, so a draft drawn without it shows a
+        // different claim from the one the mouse-up will make.
+        self.draw_draft_band(ctx, state, world, canvas_size);
         self.draw_draft(state, world, canvas_size);
         self.draw_handles(ctx, state, world, canvas_size);
     }
@@ -302,6 +308,66 @@ impl ViewerCanvas {
             },
         );
         state.renderer.delete_lines(&buffer);
+    }
+
+    /// The draft's stroke band, when the shape being drawn will have one.
+    ///
+    /// Built and thrown away each frame, like the draft outline: it is a few
+    /// hundred triangles at most, and keeping it would mean rebuilding it on
+    /// every mouse-move anyway.
+    fn draw_draft_band(
+        &self,
+        ctx: &Context<Self>,
+        state: &ViewerCanvasState,
+        world: (f32, f32),
+        canvas_size: (f32, f32),
+    ) {
+        let Some(width) = ctx.props().draft_stroke_width.filter(|w| *w > 0.0) else {
+            return;
+        };
+        // Whichever of the two ways of drawing an open path is in progress. A
+        // click-by-click path bands its rubber band to the cursor as well, so
+        // the width is visible before the second vertex has been placed.
+        let mut points: Vec<(f32, f32)> = match &state.draft {
+            Some(draft) if draft.tool.draws_open_path() => draft.points.clone(),
+            Some(_) => return,
+            None if !state.pending.is_empty() => {
+                let mut pending = state.pending.clone();
+                pending.extend(state.cursor);
+                pending
+            }
+            None => return,
+        };
+        points.dedup();
+        let path: Vec<Point> = points.iter().map(|&(x, y)| [x as f64, y as f64]).collect();
+
+        let mut vertices: Vec<f32> = Vec::new();
+        for triangle in stroke_band(&path, width / 2.0) {
+            for [x, y] in triangle {
+                // The z range the draft outline uses: never faded by whichever
+                // slice the view happens to be on.
+                vertices.extend_from_slice(&[x as f32, y as f32, f32::NEG_INFINITY, f32::INFINITY]);
+            }
+        }
+        if vertices.is_empty() {
+            return;
+        }
+        let Ok(buffer) = state.renderer.upload_fills(&vertices) else {
+            return;
+        };
+        state.renderer.draw_fills(
+            &buffer,
+            &Self::world_placement(state, world, canvas_size),
+            &FillRenderInfo {
+                color: [1.0, 1.0, 1.0],
+                // Translucent, so the image being traced over stays readable
+                // under the band.
+                opacity: 0.35,
+                z: 0.0,
+                slab: 0.0,
+            },
+        );
+        state.renderer.delete_fills(&buffer);
     }
 
     /// A placement that says only what the world is and where the camera is.

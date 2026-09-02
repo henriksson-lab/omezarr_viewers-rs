@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
@@ -88,6 +89,19 @@ impl Tool {
             self,
             Tool::Box | Tool::Ellipse | Tool::Polygon | Tool::Freehand
         )
+    }
+
+    /// Whether a finished shape from this tool is an **open path**, and so
+    /// takes the layer's stroke width.
+    ///
+    /// Not simply `!closes()`: Point and Pan produce no path at all. The
+    /// authority on this is `geometry_of`, which decides by looking at the
+    /// geometry it built — a shortcut is needed here because the draft has to
+    /// be drawn before there is a geometry to look at, and
+    /// `a_tool_draws_an_open_path_exactly_when_its_geometry_is_one` pins the
+    /// two together so they cannot drift.
+    pub fn draws_open_path(self) -> bool {
+        matches!(self, Tool::Line | Tool::Polyline)
     }
 }
 
@@ -184,6 +198,26 @@ pub struct Editable {
     /// The file says this object must not be edited. It still selects, so its
     /// properties can be read and the lock can be taken off.
     pub locked: bool,
+    /// The width this shape's outline covers, if it is a stroke.
+    ///
+    /// A scribble is aimed at by its **band**, because the band is what is on
+    /// screen; a tolerance measured from the centreline would refuse a
+    /// shift-click the user could see land well inside the shape.
+    pub stroke_width: Option<f64>,
+}
+
+/// How far from a selected shape still counts as *on* it, in world pixels.
+///
+/// `near` is the hand's tolerance — a fixed number of screen pixels expressed
+/// in world ones, so it shrinks as the view zooms in. A **stroke** is aimed at
+/// by the band drawn on screen rather than by the centreline inside it, so on a
+/// wide scribble that band is the target and `near` alone is a small fraction
+/// of it: an edge click that plainly landed on the annotation would miss.
+///
+/// `near` stays the floor. A band narrower than a hand is steady must not
+/// become *harder* to hit than a bare line would have been.
+pub fn grab_reach(near: f32, stroke_width: Option<f64>) -> f32 {
+    near.max(stroke_width.unwrap_or(0.0) as f32 / 2.0)
 }
 
 /// A shape the user just finished drawing, in world pixels.
@@ -291,8 +325,14 @@ pub const TILE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 /// geometric rule has already decided what is visible, so the budget is only
 /// choosing which *off-screen fallback* to give up, and the oldest is a fair
 /// answer to that.
-pub struct TileStore<T = TileTexture> {
-    entries: HashMap<TileKey, Held<T>>,
+///
+/// Generic over the key as well as the payload so the orthogonal panes can
+/// hold their planes in the same store rather than in a second one with its
+/// own eviction rules: what they cache is not tiles and is not keyed like a
+/// tile, but the two problems this solves — explicit deletion, and a cap in
+/// bytes — are exactly the same ones.
+pub struct TileStore<T = TileTexture, K = TileKey> {
+    entries: HashMap<K, Held<T>>,
     /// Bytes of texture currently held, by the same arithmetic the uploads use.
     held: usize,
     /// Monotonic insertion counter; the smallest is evicted first.
@@ -306,7 +346,7 @@ struct Held<T> {
     inserted: u64,
 }
 
-impl<T> TileStore<T> {
+impl<T, K: Eq + Hash + Clone> TileStore<T, K> {
     pub fn new(capacity_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
@@ -316,11 +356,11 @@ impl<T> TileStore<T> {
         }
     }
 
-    pub fn get(&self, key: &TileKey) -> Option<&T> {
+    pub fn get(&self, key: &K) -> Option<&T> {
         self.entries.get(key).map(|held| &held.texture)
     }
 
-    pub fn contains_key(&self, key: &TileKey) -> bool {
+    pub fn contains_key(&self, key: &K) -> bool {
         self.entries.contains_key(key)
     }
 
@@ -336,7 +376,7 @@ impl<T> TileStore<T> {
     /// Add a tile, returning any texture the caller must now delete — the one
     /// it replaced, plus whatever the budget pushed out.
     #[must_use = "the returned textures are still on the GPU until deleted"]
-    pub fn insert(&mut self, key: TileKey, texture: T, width: u32, height: u32) -> Vec<T> {
+    pub fn insert(&mut self, key: K, texture: T, width: u32, height: u32) -> Vec<T> {
         let bytes = bytes_for(width, height);
         let mut freed = Vec::new();
         self.clock += 1;
@@ -345,19 +385,19 @@ impl<T> TileStore<T> {
             bytes,
             inserted: self.clock,
         };
-        if let Some(old) = self.entries.insert(key, held) {
+        if let Some(old) = self.entries.insert(key.clone(), held) {
             self.held -= old.bytes;
             freed.push(old.texture);
         }
         self.held += bytes;
-        freed.extend(self.trim());
+        freed.extend(self.trim(&key));
         freed
     }
 
     /// Keep only what `keep` says, returning the rest to be deleted.
     #[must_use = "the returned textures are still on the GPU until deleted"]
-    pub fn retain(&mut self, keep: impl Fn(&TileKey) -> bool) -> Vec<T> {
-        let doomed: Vec<TileKey> = self
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) -> Vec<T> {
+        let doomed: Vec<K> = self
             .entries
             .keys()
             .filter(|key| !keep(key))
@@ -369,19 +409,27 @@ impl<T> TileStore<T> {
             .collect()
     }
 
-    fn remove(&mut self, key: &TileKey) -> Option<T> {
+    fn remove(&mut self, key: &K) -> Option<T> {
         let held = self.entries.remove(key)?;
         self.held -= held.bytes;
         Some(held.texture)
     }
 
-    /// Drop the oldest until the budget is met.
-    fn trim(&mut self) -> Vec<T> {
+    /// Drop the oldest until the budget is met, never the entry just inserted.
+    ///
+    /// A store that instantly forgets what it was just handed is worse than one
+    /// that sits marginally over budget: the caller has already deleted its own
+    /// copy of the handle, so the entry it needs *now* would be the one it
+    /// cannot draw. Tiles never come near this — a tile is a megabyte against a
+    /// budget of hundreds — but an orthogonal plane crosses the whole store and
+    /// can on its own be a large fraction of a pane's budget.
+    fn trim(&mut self, protected: &K) -> Vec<T> {
         let mut freed = Vec::new();
         while self.capacity > 0 && self.held > self.capacity {
             let Some(victim) = self
                 .entries
                 .iter()
+                .filter(|(key, _)| *key != protected)
                 .min_by_key(|(_, held)| held.inserted)
                 .map(|(key, _)| key.clone())
             else {
@@ -477,6 +525,17 @@ pub struct ViewerCanvasProps {
     /// An edit the user finished.
     #[prop_or_default]
     pub on_edit: Callback<Editing>,
+    /// The stroke width the shape being drawn *right now* will be stored with,
+    /// or `None` if it will have none.
+    ///
+    /// Resolved by the app rather than worked out here, because it depends on
+    /// the target layer's setting as well as on the tool, and the canvas knows
+    /// nothing about layers' annotation state. Drawing the draft without it
+    /// meant the band appeared on mouse-up: the shape you were about to get was
+    /// not the shape you could see, and the width is the whole claim a scribble
+    /// makes.
+    #[prop_or_default]
+    pub draft_stroke_width: Option<f64>,
 }
 
 /// WebGL2 canvas component handling rendering, pan, and zoom.
@@ -714,5 +773,34 @@ mod tile_store_tests {
         assert_eq!(dropped, 2, "each dropped texture must reach delete_tiles");
         assert_eq!(store.len(), 2);
         assert_eq!(store.bytes(), bytes_for(64, 64) * 2);
+    }
+}
+
+#[cfg(test)]
+mod grab_tests {
+    use super::grab_reach;
+
+    #[test]
+    fn a_bare_line_is_grabbed_by_the_hands_tolerance() {
+        assert_eq!(grab_reach(4.0, None), 4.0);
+    }
+
+    #[test]
+    fn a_wide_scribble_is_grabbed_by_its_band() {
+        // 24 world px wide, zoomed in far enough that the hand's tolerance is
+        // 4: the band is the target, and it reaches 12 either side.
+        assert_eq!(grab_reach(4.0, Some(24.0)), 12.0);
+    }
+
+    #[test]
+    fn a_band_narrower_than_the_hand_does_not_make_the_shape_harder_to_hit() {
+        // The floor matters: without it a 2px scribble would offer a 1px
+        // target, where a bare line with no width at all offers 20.
+        assert_eq!(grab_reach(20.0, Some(2.0)), 20.0);
+    }
+
+    #[test]
+    fn a_width_of_zero_is_not_a_narrower_target_than_none() {
+        assert_eq!(grab_reach(4.0, Some(0.0)), grab_reach(4.0, None));
     }
 }

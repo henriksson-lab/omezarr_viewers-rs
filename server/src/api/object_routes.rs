@@ -7,7 +7,7 @@
 use actix_web::{get, web, HttpResponse, Responder};
 use serde::Deserialize;
 
-use crate::objects::ObjectQuery;
+use crate::objects::{ObjectQuery, ObjectStore};
 
 use super::{layer_objects, AppState};
 
@@ -49,16 +49,11 @@ pub async fn objects(data: web::Data<AppState>, query: web::Query<ObjectsQuery>)
         }
     };
 
-    let requested: Vec<usize> = match &q.columns {
-        Some(names) if !names.is_empty() => names
-            .split(',')
-            .filter_map(|name| {
-                store
-                    .columns()
-                    .iter()
-                    .position(|column| column.name == name.trim())
-            })
-            .collect(),
+    let requested = match &q.columns {
+        Some(names) if !names.is_empty() => match resolve_columns(&store, names) {
+            Ok(indices) => indices,
+            Err(res) => return res,
+        },
         _ => Vec::new(),
     };
 
@@ -81,6 +76,46 @@ pub async fn objects(data: web::Data<AppState>, query: web::Query<ObjectsQuery>)
         .insert_header(("X-Returned", returned.to_string()))
         .insert_header(("X-Truncated", (returned < total).to_string()))
         .body(bytes)
+}
+
+/// The index of each requested column, or a refusal naming the ones that are
+/// not there.
+///
+/// Refused rather than *reported*, which is the other half of this codebase's
+/// habit — an ROI-table save says how many shapes it flattened instead of
+/// flattening quietly. A report works when the answer is still correct and
+/// merely lossy. Here it is not: the buffer carries a plane per column and the
+/// client indexes them **positionally**, so dropping the second of three names
+/// hands back two planes that the client reads as the first two columns it
+/// asked for. Every value after the typo arrives under the wrong label, and a
+/// header saying so only helps a client that thought to read it. A name that
+/// matches nothing is a caller's value out of range, so it is a 400 before
+/// anything is encoded.
+fn resolve_columns(store: &ObjectStore, names: &str) -> Result<Vec<usize>, HttpResponse> {
+    let mut indices = Vec::new();
+    let mut unknown = Vec::new();
+    for name in names.split(',') {
+        let name = name.trim();
+        // A trailing comma names nothing and shifts nothing, so it is dropped
+        // rather than refused: no plane is added for it, and the client that
+        // wrote it was not counting one.
+        if name.is_empty() {
+            continue;
+        }
+        match store.columns().iter().position(|c| c.name == name) {
+            Some(at) => indices.push(at),
+            None => unknown.push(name.to_string()),
+        }
+    }
+    if unknown.is_empty() {
+        return Ok(indices);
+    }
+    let known: Vec<&str> = store.columns().iter().map(|c| c.name.as_str()).collect();
+    Err(HttpResponse::BadRequest().body(format!(
+        "no column named {} in this layer (columns: {})",
+        unknown.join(", "),
+        known.join(", ")
+    )))
 }
 
 /// Query parameters for /api/objects/at.

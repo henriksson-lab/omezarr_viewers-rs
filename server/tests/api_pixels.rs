@@ -10,9 +10,14 @@
 mod api_harness;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use api_harness::{Api, Res, SHAPE};
 use omezarr_viewer_server::session::LayerRole;
+use zarrs::array::{ArrayBuilder, DataType, FillValue};
+use zarrs::array_subset::ArraySubset;
+use zarrs::filesystem::FilesystemStore;
+use zarrs::group::GroupBuilder;
 
 /// An id that does not survive an f32 round trip: `2^24 + 1` is the first
 /// integer f32 cannot hold, and a label id is exactly the kind of number that
@@ -91,6 +96,53 @@ fn write_big_id_labels(root: &Path) -> PathBuf {
 
     let path = root.join("big_ids.npy");
     std::fs::write(&path, npy).expect("write big_ids.npy");
+    path
+}
+
+/// Write a one-level `(z, y, x)` OME-Zarr: a store with no channel axis at all.
+///
+/// Nothing in `synthetic` writes one — every fixture there declares a `c` axis,
+/// and so does the `.npy` volume, which reports itself as a single channel. A
+/// plain 3D store is ordinary in the wild, and it is the case the channel check
+/// has to let through: its `c` names an axis that is not there, so the reader
+/// ignores it the way it ignores `t`.
+fn write_channelless_image(root: &Path) -> PathBuf {
+    let path = root.join("no_channels.zarr");
+    let store = Arc::new(FilesystemStore::new(&path).expect("create store"));
+    let shape = vec![2u64, 4, 4];
+    let values: Vec<u16> = (0..32u16).collect();
+    let array = ArrayBuilder::new(
+        shape.clone(),
+        DataType::UInt16,
+        vec![1, 4, 4].try_into().expect("chunk shape"),
+        FillValue::from(0u16),
+    )
+    .build(store.clone(), "/0")
+    .expect("build array");
+    array.store_metadata().expect("array metadata");
+    array
+        .store_array_subset_elements(&ArraySubset::new_with_shape(shape), &values)
+        .expect("store elements");
+
+    let attributes = serde_json::json!({
+        "multiscales": [{
+            "name": "no-channels",
+            "axes": [
+                {"name": "z", "type": "space"},
+                {"name": "y", "type": "space"},
+                {"name": "x", "type": "space"},
+            ],
+            "datasets": [{
+                "path": "0",
+                "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0]}],
+            }],
+        }],
+    });
+    let group = GroupBuilder::new()
+        .attributes(attributes.as_object().expect("attributes").clone())
+        .build(store, "/")
+        .expect("build group");
+    group.store_metadata().expect("group metadata");
     path
 }
 
@@ -365,15 +417,81 @@ async fn a_tile_past_the_edge_of_the_volume_is_padded_rather_than_refused() {
 }
 
 #[actix_web::test]
-async fn a_channel_that_does_not_exist_comes_back_black_rather_than_refused() {
+async fn a_channel_that_does_not_exist_is_a_400_from_every_pixel_route() {
     let api = Api::image().await;
-    // The fixture has two channels. Asking for the tenth is answered with the
-    // fill value and a 200 — pinned as current behaviour, and reported: unlike
-    // an overhanging tile, a channel index has no legitimate out-of-range case,
-    // so a black tile here is indistinguishable from real black data.
-    let res = api.get("/api/tile?level=0&c=9&z=0&y=0&x=0&h=8&w=8").await;
+    // The fixture has two channels. Asking for the tenth used to be answered
+    // with the fill value and a 200, because zarrs pads an out-of-bounds
+    // subset — and a black tile is exactly what genuinely black data looks
+    // like. Unlike an overhanging y/x tile, a channel index has no legitimate
+    // out-of-range case, so it is the caller's value out of range: a 400,
+    // before a chunk is read, naming the channel and how many there are.
+    for uri in [
+        "/api/tile?level=0&c=9&z=0&y=0&x=0&h=8&w=8",
+        "/api/value?level=0&c=9&z=0&y=0&x=0",
+        "/api/slice?level=0&c=9&index=0",
+    ] {
+        let res = api.get(uri).await;
+        assert_eq!(res.status, 400, "{uri}: {} {}", res.status, res.text());
+        assert!(
+            res.text().contains("channel 9") && res.text().contains("2 channel"),
+            "{uri}: {}",
+            res.text()
+        );
+    }
+}
+
+#[actix_web::test]
+async fn the_last_channel_the_volume_has_is_not_off_by_one() {
+    let api = Api::image().await;
+    // The other half of the refusal: `c=1` is the second of two and must still
+    // answer. A check that refused it would black out half of every store.
+    let res = api.get("/api/tile?level=0&c=1&z=0&y=0&x=0&h=8&w=8").await;
     assert_tile(&res, "float32", 8, 8);
-    assert!(f32_pixels(&res.body).iter().all(|v| *v == 0.0));
+    let first = api.get("/api/tile?level=0&c=0&z=0&y=0&x=0&h=8&w=8").await;
+    assert_ne!(
+        res.body, first.body,
+        "the two channels of the fixture hold different values"
+    );
+}
+
+#[actix_web::test]
+async fn a_channel_index_is_ignored_by_a_store_that_has_no_channel_axis() {
+    let api = Api::image().await;
+    let path = write_channelless_image(api.dir.path());
+    let layer = api.open(&path, LayerRole::Image).await;
+    // A `(z, y, x)` store's `c` names an axis it does not have, and the reader
+    // ignores it rather than indexing something else with it — the same rule
+    // `t` already follows on the four-axis fixture. There is no out-of-range
+    // channel to refuse here, and refusing one would 400 every tile of an
+    // ordinary 3D store.
+    let plain = api
+        .get(&format!(
+            "/api/tile?layer={layer}&level=0&z=1&y=0&x=0&h=4&w=4"
+        ))
+        .await;
+    let channelled = api
+        .get(&format!(
+            "/api/tile?layer={layer}&level=0&c=9&z=1&y=0&x=0&h=4&w=4"
+        ))
+        .await;
+    assert_tile(&channelled, "float32", 4, 4);
+    assert_eq!(channelled.body, plain.body);
+}
+
+#[actix_web::test]
+async fn a_volume_that_declares_one_channel_has_no_second_one() {
+    let api = Api::image().await;
+    // A `.npy` volume describes itself as a one-channel `(c, z, y, x)` dataset,
+    // which is what the client's channel list is built from — so `c=1` is a
+    // channel it was never offered, and is refused like any other.
+    let path = write_big_id_labels(api.dir.path());
+    let layer = api.open(&path, LayerRole::Labels).await;
+    let res = api
+        .get(&format!(
+            "/api/tile?layer={layer}&level=0&c=1&z=1&y=0&x=0&h=4&w=4&encoding=raw"
+        ))
+        .await;
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
 }
 
 #[actix_web::test]

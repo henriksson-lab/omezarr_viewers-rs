@@ -163,7 +163,7 @@ async fn columns_come_back_as_f32_in_the_order_they_were_asked_for() {
 }
 
 #[actix_web::test]
-async fn a_column_name_nothing_matches_is_dropped_rather_than_refused() {
+async fn a_column_name_nothing_matches_is_refused_rather_than_dropped() {
     let api = Api::with_objects().await;
     let layer = api.layer_of_kind("objects").await;
     let res = api
@@ -172,15 +172,49 @@ async fn a_column_name_nothing_matches_is_dropped_rather_than_refused() {
             whole_world(&layer)
         ))
         .await;
-    // Current behaviour, and worth pinning either way: the unknown name is
-    // silently skipped, so the client gets ONE column back where it asked for
-    // two and has no way to tell which one it lost.
-    let objs = decode(&res);
-    assert_eq!(
-        objs.values.len(),
-        1,
-        "the unmatched name contributes nothing"
+    // The unknown name used to be skipped, which left one plane where two were
+    // asked for — and the client indexes planes *positionally*, so every column
+    // after the typo arrived under the wrong label. A name that matches nothing
+    // is a caller's value out of range, so it is refused before anything is
+    // encoded, and the refusal names both the miss and what is on offer.
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
+    assert!(res.text().contains("nosuchcolumn"), "{}", res.text());
+    assert!(
+        res.text().contains("size"),
+        "the refusal lists the columns there are: {}",
+        res.text()
     );
+}
+
+#[actix_web::test]
+async fn one_bad_name_refuses_the_whole_request_rather_than_the_columns_around_it() {
+    let api = Api::with_objects().await;
+    let layer = api.layer_of_kind("objects").await;
+    // Nothing partial: a buffer holding the good columns would still be read
+    // positionally, which is the failure the refusal exists to prevent.
+    let res = api
+        .get(&format!("{}&columns=nope,size", whole_world(&layer)))
+        .await;
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
+    assert!(
+        !res.body.starts_with(b"OBJS"),
+        "no partial buffer came back: {}",
+        res.text()
+    );
+}
+
+#[actix_web::test]
+async fn a_trailing_comma_names_nothing_and_is_not_an_error() {
+    let api = Api::with_objects().await;
+    let layer = api.layer_of_kind("objects").await;
+    // An empty segment adds no plane, so it shifts nothing and the client that
+    // wrote it was not counting one. Refusing it would turn a stray comma into
+    // a failed read for no gain.
+    let res = api
+        .get(&format!("{}&columns=size,", whole_world(&layer)))
+        .await;
+    let objs = decode(&res);
+    assert_eq!(objs.values.len(), 1, "{}", res.status);
 }
 
 // -- decimation: the headline claim ------------------------------------------

@@ -32,6 +32,9 @@ pub struct AnnotPanelProps {
     pub class: String,
     /// The object type new shapes get.
     pub object_type: ObjectType,
+    /// The stroke width the next open path gets, in world pixels, or `None` for
+    /// a geometric line covering no pixels at all.
+    pub stroke_width: Option<f64>,
     /// Show only this class, when one is chosen.
     pub filter: Option<String>,
     /// Every class present, for the filter list.
@@ -40,6 +43,11 @@ pub struct AnnotPanelProps {
     pub class_colors: Vec<[f32; 3]>,
     /// Drawn now, of how many there are.
     pub shown: usize,
+    /// How many shapes assert that everything inside them is annotated, and how
+    /// many carry a stroke width. Counted by the layer rather than here, so the
+    /// panel and the picture cannot come to different answers.
+    pub dense: usize,
+    pub scribbles: usize,
     pub save_target: String,
     pub saving: bool,
     pub dirty: bool,
@@ -58,8 +66,15 @@ pub struct AnnotPanelProps {
     pub on_slab: Callback<f32>,
     pub on_class: Callback<String>,
     pub on_object_type: Callback<ObjectType>,
+    /// The width new open paths get. `None` turns the stroke off entirely.
+    pub on_stroke_width: Callback<Option<f64>>,
     /// Per-object, on the selected annotation.
     pub on_name: Callback<String>,
+    /// The selected shape's own stroke width, or `None` for a geometric line.
+    pub on_selected_stroke: Callback<Option<f64>>,
+    /// Mark the selected shape as asserting that everything inside it is
+    /// annotated, or unmark it.
+    pub on_dense: Callback<bool>,
     pub on_selected_type: Callback<ObjectType>,
     pub on_locked: Callback<bool>,
     pub on_filter: Callback<Option<String>>,
@@ -140,6 +155,65 @@ fn text(cb: Callback<String>) -> Callback<InputEvent> {
     })
 }
 
+/// The width a stroke starts at when one is turned on, in world pixels.
+///
+/// A visible band at the zoom regions are usually drawn at, and a round number
+/// so what it means is legible: a scribble 8 wide covers the pixels within 4 of
+/// the path.
+const DEFAULT_STROKE_WIDTH: f64 = 8.0;
+
+/// One "is this a scribble, and how wide" row.
+///
+/// Two controls rather than one number, because *no width* and *zero width* are
+/// different claims and must not share a value. `None` is a geometric line —
+/// GeoJSON's `LineString`, a curve covering no pixels at all — and only the
+/// checkbox says it; the number input refuses anything that is not positive, so
+/// there is no way to type a zero and land somewhere ambiguous. The row says
+/// which of the two states it is in in words, not by an empty box.
+///
+/// The width is in **world** pixels: it is an assertion about the image, so it
+/// must not change with the zoom the curator happened to be at.
+fn stroke_row(width: Option<f64>, hook: &str, on_change: &Callback<Option<f64>>) -> Html {
+    let toggle = {
+        let cb = on_change.clone();
+        Callback::from(move |e: Event| {
+            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
+            cb.emit(input.checked().then_some(DEFAULT_STROKE_WIDTH));
+        })
+    };
+    let typed = {
+        let cb = on_change.clone();
+        Callback::from(move |e: Event| {
+            let input: web_sys::HtmlInputElement = e.target_unchecked_into();
+            match input.value().parse::<f64>() {
+                Ok(value) if value > 0.0 => cb.emit(Some(value)),
+                // Not a width. Turning the stroke off is what the checkbox is
+                // for, and doing it from here would mean 0 said it too.
+                _ => {}
+            }
+        })
+    };
+    html! {
+        <div class="slider-row">
+            <label title="A scribble covers the pixels within half this width of \
+                          the path, in the image's own pixels. Off, the path is a \
+                          geometric line covering no pixels \u{2014} which is a \
+                          different claim, not a narrower one.">
+                <input type="checkbox" class={format!("{hook}-on")}
+                    checked={width.is_some()} onchange={toggle} />
+                {" Scribble"}
+            </label>
+            if let Some(value) = width {
+                <input type="number" class={format!("{hook}-width")}
+                    min="0.5" step="0.5" value={format!("{value}")} onchange={typed} />
+                <span class={format!("slider-value {hook}-readout")}>{"px wide"}</span>
+            } else {
+                <span class={format!("slider-value {hook}-readout")}>{"geometric line"}</span>
+            }
+        </div>
+    }
+}
+
 fn object_type(cb: Callback<ObjectType>) -> Callback<Event> {
     Callback::from(move |e: Event| {
         let input: web_sys::HtmlSelectElement = e.target_unchecked_into();
@@ -217,6 +291,10 @@ fn layer_section(props: &AnnotPanelProps) -> Html {
                 })}
             </select>
         </div>
+        // What a new *open* path covers. A closed region already says where
+        // its pixels are; a path has no width until one is given, and the
+        // difference is the difference between partial and total supervision.
+        { stroke_row(props.stroke_width, "annot-stroke", &props.on_stroke_width) }
         <div class="slider-row">
             <span>{"Show"}</span>
             <select class="annot-filter" onchange={on_filter}>
@@ -341,6 +419,22 @@ fn selected_section(props: &AnnotPanelProps, selected: Option<&Annotation>) -> H
                     {" Locked"}
                 </label>
             </div>
+            { stroke_row(item.stroke_width, "annot-selected-stroke", &props.on_selected_stroke) }
+            // What an unlabelled pixel means, and there is no default that is
+            // safe to guess. Sparse — the default — says a mark covers what it
+            // covers and asserts nothing about anything else. Dense says the
+            // curator marked *every* instance inside this shape, so uncovered
+            // means background there. A trainer given the second when the first
+            // was true learns that every unmarked object is background.
+            <div class="slider-row">
+                <label title="Everything inside this shape is annotated: uncovered \
+                              pixels in it are background, not unexamined. Leave it \
+                              off unless every instance inside really is marked.">
+                    <input type="checkbox" class="annot-dense" checked={item.dense_region}
+                        onchange={checkbox(props.on_dense.clone())} />
+                    {" Dense region"}
+                </label>
+            </div>
             <SliderRow label="Depth" min="0" max="64" step="1"
                 value={item.z_extent.to_string()}
                 display={format!("{} z", item.z_extent + 1)}
@@ -391,12 +485,22 @@ fn shape_table(props: &AnnotPanelProps) -> Html {
                     .count();
                 html! {
                     <tr class={row_class}>
-                        <td class="annot-kind" onclick={on_select} title={describe(item)}
+                        <td class={if item.dense_region { "annot-kind dense" } else { "annot-kind" }}
+                            onclick={on_select} title={describe(item)}
                             // Indent by nesting depth, so the list reads as
                             // the tree it is. QuPath's hierarchy is spatial:
                             // a cell drawn inside a region is a child of it.
                             style={format!("padding-left: {}px", 2 + depth * 10)}>
                             { glyph_of(item) }
+                            // A dense region is a different kind of claim from
+                            // everything else in this list, so it is marked
+                            // here too rather than only on the canvas.
+                            if item.dense_region {
+                                <span class="annot-dense-mark"
+                                    title="Dense: everything inside is annotated">
+                                    {"\u{25a8}"}
+                                </span>
+                            }
                         </td>
                         <td>
                             <input type="text" value={item.label.clone()}
@@ -489,6 +593,7 @@ fn store_section(
 
         <div class="info-text">
             <p>{ counts(props, points, boxes) }</p>
+            { supervision(props) }
             <p class="hint">
                 {"Drag a vertex to move it \u{00b7} shift-click a vertex to \
                   delete \u{00b7} shift-click an edge to insert"}
@@ -531,6 +636,12 @@ fn describe(item: &Annotation) -> String {
             item.plane.t + item.t_extent as i32
         ));
     }
+    if let Some(width) = item.stroke_width.filter(|w| *w > 0.0) {
+        text.push_str(&format!(", stroke {width} wide"));
+    }
+    if item.dense_region {
+        text.push_str(", dense");
+    }
     if let Some(name) = &item.name {
         text.push_str(&format!(" \u{00b7} {name}"));
     }
@@ -565,6 +676,34 @@ fn glyph_of(item: &Annotation) -> &'static str {
         Geometry::LineString(_) | Geometry::MultiLineString(_) => "\u{2571}",
         Geometry::Polygon(rings) if rings.len() > 1 => "\u{25a3}",
         _ => "\u{25a1}",
+    }
+}
+
+/// What this layer says about the pixels nothing covers.
+///
+/// The two counts are the layer's supervision state, and there is nowhere else
+/// to read it: a set with no dense region asserts nothing about any pixel it
+/// does not cover, and one with a dense region asserts *background* everywhere
+/// inside it. Both are legitimate; reading one as the other is what ruins a
+/// training set, so the panel says which this is rather than leaving it to be
+/// inferred from the drawing.
+fn supervision(props: &AnnotPanelProps) -> Html {
+    let (dense, scribbles) = (props.dense, props.scribbles);
+    html! {
+        <p class="annot-supervision">
+            <span class="annot-dense-count">{ format!("{dense} dense region(s)") }</span>
+            { " \u{00b7} " }
+            <span class="annot-scribble-count">{ format!("{scribbles} scribble(s)") }</span>
+            <br />
+            <span class="hint">
+                { if dense == 0 {
+                    "No dense region: every pixel nothing covers is unexamined."
+                } else {
+                    "Unlabelled means background inside a dense region, \
+                     and unexamined everywhere else."
+                } }
+            </span>
+        </p>
     }
 }
 

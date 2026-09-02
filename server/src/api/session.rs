@@ -146,19 +146,48 @@ pub async fn save_project(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Handle POST /api/project — replace the session with a project's layers.
+///
+/// The new layers are opened *alongside* the old ones and the old ones dropped
+/// afterwards, rather than clearing first. Clearing first meant a project whose
+/// every layer was unopenable answered 200 with an empty list: the user lost
+/// what they had and the client was told nothing was wrong. `POST /api/open`
+/// refuses before it clears, and this now does the same.
+///
+/// A project that opens *some* of its layers is still a success — a run
+/// directory with one truncated output should show the rest — so the count that
+/// did not open rides in `X-Skipped` rather than changing the status.
 #[post("/api/project")]
 pub async fn open_project(data: web::Data<AppState>, body: web::Json<Project>) -> impl Responder {
     let wanted = body.into_inner();
     let mut session = data.session.write().await;
-    session.clear();
-    data.cache.clear();
-    match wanted.open(&data.registry, &mut session).await {
-        Ok(opened) => {
-            log::info!("opened {opened} of {} layer(s)", wanted.layers.len());
-            HttpResponse::Ok().json(session.info())
-        }
-        Err(e) => HttpResponse::BadRequest().body(format!("Error: {e:#}")),
+    let previous: Vec<String> = session.layers().iter().map(|l| l.id.clone()).collect();
+
+    let report = match wanted.open_reporting(&data.registry, &mut session).await {
+        Ok(report) => report,
+        Err(e) => return HttpResponse::BadRequest().body(format!("Error: {e:#}")),
+    };
+    // A project that names no layers is asking for an empty session, and gets
+    // one; a project that names layers and opened none of them is a request
+    // that failed, so the session it would have replaced is left standing.
+    if report.opened.is_empty() && !wanted.layers.is_empty() {
+        return HttpResponse::BadRequest().body(format!(
+            "no layer of this project could be opened:\n{}",
+            report.skipped.join("\n")
+        ));
     }
+    for id in &previous {
+        session.remove(id);
+    }
+    // Cache keys carry a layer id, and every id the old session used is gone.
+    data.cache.clear();
+    log::info!(
+        "opened {} of {} layer(s)",
+        report.opened.len(),
+        wanted.layers.len()
+    );
+    HttpResponse::Ok()
+        .insert_header(("X-Skipped", report.skipped.len().to_string()))
+        .json(session.info())
 }
 
 /// Body of POST /api/layers.

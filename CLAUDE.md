@@ -158,7 +158,6 @@ scanpy and squidpy, already in the image's own pixels and so taken unscaled.
 See PLAN.md phases 8-11.
 
 ### Things that are the way they are for a reason
-### Things that are the way they are for a reason
 
 Each of these was a bug or a wrong picture before it was a rule:
 
@@ -174,10 +173,15 @@ Each of these was a bug or a wrong picture before it was a rule:
 - **A ring's seam is asked about before it moves.** Once one end of a closed ring has shifted, the ring no longer looks closed, and the check that keeps its two ends together fails — so `move_vertex` decides it is a ring first, then moves.
 - **A scale of exactly 1 is a no-op, not a computation.** `ox + (p - ox)` is not always `p`, so a resize drag that ends where it began would otherwise shift every vertex by an ULP.
 - **Shift is the vertex modifier, so a shift-click that misses does nothing.** Panning instead sends the picture sliding away from somebody who was aiming at a handle and was three pixels out.
-- **A point is grabbed by its body, never by a corner.** All four of its corners are the same coordinate, so a corner drag resized a zero-size box into a zero-size box — which looks exactly like a broken drag.
 - **A freehand trace is simplified as it is stored.** A mouse-move fires far more often than a hand moves a pixel, and the vertex editor cannot offer handles nobody can tell apart.
 - **A session reload takes an annotation layer's rows from the server, not from the client.** `adopt_session` keeps a layer's UI state so a redraw does not reset the panel — but an annotation layer's *rows* arrive with the session, so carrying the old state wholesale wrote the stale rows back over the fresh ones and made every undo-by-reload silently do nothing. `AnnotUiState::keep_view_of` keeps the colours and filters and nothing else.
 - **A point is grabbed by its body, never by a corner.** All four of its corners are the same coordinate, so a corner drag resized a zero-size box into a zero-size box — which looks exactly like a broken drag.
+- **Class zero is not a class.** A rasteriser zeroes its volume before anything draws into it, so zero has to mean *no shape covers this voxel*; a class rendering as zero produces exactly the volume a shape that never arrived produces. Fragment class ids are therefore one-based, and `blockflow`'s rasterise op refuses class zero by name rather than drawing it. The viewer and the op were each internally consistent about this and disagreed with each other, which is why the pipeline is now pinned by one **golden blob committed to both repositories** — `fragments.bftable`. It is copied rather than shared: tying two repositories to a directory layout neither controls is the worse coupling.
+- **A stroke width is a size in the image, never on the screen.** The band is world-space triangles, not a wide line: `lineWidth` above 1 is not portable in WebGL2 and is screen-space where it works at all, and a scribble whose apparent width changed with the zoom would be showing an assertion nobody made. The centreline is stroked underneath so a sub-pixel band cannot vanish entirely.
+- **A scribble is grabbed by its band, not by its centreline.** The grab tolerance is a fixed number of *screen* pixels expressed in world ones, so it shrinks as the view zooms in; on a wide band only its middle answered a click, and a shift-click that plainly landed on the shape did nothing. `grab_reach` takes the larger of the two — the hand's tolerance stays the floor, so a narrow band is never *harder* to hit than a bare line, and the body test uses it too because the bounds are the vertices and the band stands half its width outside them.
+- **The draft is drawn with the width it will be stored with.** Otherwise the band appears on mouse-up and the shape you are about to get is not the shape you can see. The canvas cannot work the width out — there is no geometry until the drag ends — so the app resolves it; the tool→open-path shortcut that needs is pinned to `geometry_of` by a test over every `Tool`, because two answers to "is this an open path?" is exactly how a shape gets drawn with a band it is not stored with.
+- **A dense region is hatched, not filled.** It claims something an ordinary region does not — inside it, a pixel nothing covers is *background* rather than unexamined — so it must not look like an ordinary region that happens to have Fill on.
+- **A plane cache keys on the transpose as well as the slice.** The texture is uploaded after the transpose, so a plane fetched for the other orientation is a wrong picture rather than a slow one. Pane size is deliberately *not* in the key: it chooses the level, and the level is.
 - **Undo is a stack of inverses, not of snapshots.** Every annotation edit is one API call, so its undo is one too; snapshots would grow with the size of the set rather than with the number of edits.
 
 ### CI

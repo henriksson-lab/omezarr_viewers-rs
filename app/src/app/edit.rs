@@ -166,6 +166,42 @@ pub(super) fn is_axis_aligned_rect(item: &Annotation) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// `Tool::draws_open_path` is a shortcut, and `geometry_of` is the
+    /// authority: the draft has to be drawn before there is a geometry to ask.
+    /// If the two ever disagree, a scribble is drawn with a band it will not be
+    /// stored with, or stored with one it was never drawn with.
+    #[test]
+    fn a_tool_draws_an_open_path_exactly_when_its_geometry_is_one() {
+        // A drag long enough to survive `simplify`, and enough vertices for the
+        // click-by-click tools to make a ring.
+        let points = vec![(10.0, 10.0), (60.0, 12.0), (62.0, 70.0), (12.0, 68.0)];
+        for tool in [
+            Tool::Pan,
+            Tool::Point,
+            Tool::Box,
+            Tool::Ellipse,
+            Tool::Polygon,
+            Tool::Polyline,
+            Tool::Freehand,
+            Tool::Line,
+        ] {
+            let drawn = Drawn {
+                tool,
+                points: points.clone(),
+            };
+            let open = matches!(
+                geometry_of(&drawn),
+                Some((Geometry::LineString(_) | Geometry::MultiLineString(_), _))
+            );
+            assert_eq!(
+                open,
+                tool.draws_open_path(),
+                "{tool:?}: geometry_of says open={open}, draws_open_path says {}",
+                tool.draws_open_path()
+            );
+        }
+    }
+
     use super::*;
     use crate::viewer_canvas::ELLIPSE_SEGMENTS;
 

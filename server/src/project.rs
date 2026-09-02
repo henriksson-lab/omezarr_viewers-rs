@@ -50,6 +50,22 @@ pub struct Project {
     pub layers: Vec<ProjectLayer>,
 }
 
+/// What opening a project actually did.
+#[derive(Debug, Default)]
+pub struct OpenReport {
+    /// The session id of each layer that opened, in draw order.
+    pub opened: Vec<String>,
+    /// One `source: reason` line per layer that did not.
+    pub skipped: Vec<String>,
+}
+
+impl OpenReport {
+    fn skip(&mut self, source: &str, e: anyhow::Error) {
+        log::warn!("skipping `{source}`: {e:#}");
+        self.skipped.push(format!("{source}: {e:#}"));
+    }
+}
+
 impl Project {
     /// Read a project file, resolving relative sources against its directory.
     pub fn read(path: &Path) -> Result<Self> {
@@ -64,18 +80,34 @@ impl Project {
         Ok(project)
     }
 
-    /// Open every layer into a session, in order.
+    /// Open every layer into a session, in order, and say how many arrived.
     ///
     /// A layer that fails to open is **reported and skipped**, not fatal: a run
     /// directory with one truncated output should still show the rest, and the
     /// alternative is a viewer that refuses to open anything.
     pub async fn open(&self, registry: &SourceRegistry, session: &mut Session) -> Result<usize> {
-        let mut opened = 0;
+        Ok(self.open_reporting(registry, session).await?.opened.len())
+    }
+
+    /// [`Project::open`], keeping the ids that opened and the reasons the rest
+    /// did not.
+    ///
+    /// The count is all a startup path needs, because it only logs it. A caller
+    /// that has to *decide* something needs more: `POST /api/project` answers
+    /// differently for "three of four opened", which is a success worth a
+    /// warning, and "none of them did", which is the request being wrong and
+    /// must not cost the caller the session they already had.
+    pub async fn open_reporting(
+        &self,
+        registry: &SourceRegistry,
+        session: &mut Session,
+    ) -> Result<OpenReport> {
+        let mut report = OpenReport::default();
         for layer in &self.layers {
             let spec = match SourceSpec::parse(&layer.source) {
                 Ok(spec) => spec,
                 Err(e) => {
-                    log::warn!("skipping `{}`: {e:#}", layer.source);
+                    report.skip(&layer.source, e);
                     continue;
                 }
             };
@@ -87,13 +119,13 @@ impl Project {
                 .await
             {
                 Ok(id) => {
-                    opened += 1;
                     log::info!("opened {id} from {}", layer.source);
+                    report.opened.push(id);
                 }
-                Err(e) => log::warn!("skipping `{}`: {e:#}", layer.source),
+                Err(e) => report.skip(&layer.source, e),
             }
         }
-        Ok(opened)
+        Ok(report)
     }
 
     /// Build a project from a directory: a run, a workspace, or a folder of

@@ -195,8 +195,42 @@ async fn posting_a_project_replaces_the_open_layers() {
 }
 
 #[actix_web::test]
-async fn a_project_layer_that_cannot_be_opened_is_skipped() {
+async fn a_project_layer_that_cannot_be_opened_is_skipped_and_the_count_reported() {
     let api = Api::empty().await;
+    let missing = api.dir.path().join("gone.zarr");
+    write_image(&api.store);
+    let res = api
+        .post(
+            "/api/project",
+            json!({"layers": [
+                {"source": format!("file://{}", api.store.display()), "role": "image"},
+                {"source": format!("file://{}", missing.display())},
+            ]}),
+        )
+        .await;
+    // Deliberate: a run directory with one truncated output should still open
+    // the rest, so a layer that fails is skipped, not fatal. What it is *not*
+    // is silent — the count that did not open rides in a header, because the
+    // session alone cannot say whether a layer was asked for.
+    assert!(res.is_ok(), "{} {}", res.status, res.text());
+    assert_eq!(
+        res.json()["layers"].as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        res.text()
+    );
+    assert_eq!(
+        res.header("x-skipped").as_deref(),
+        Some("1"),
+        "{}",
+        res.text()
+    );
+}
+
+#[actix_web::test]
+async fn a_project_that_opens_nothing_is_refused_and_leaves_the_session_standing() {
+    let api = Api::with_labels().await;
+    let before = api.layer_ids().await;
     let missing = api.dir.path().join("gone.zarr");
     let res = api
         .post(
@@ -204,10 +238,59 @@ async fn a_project_layer_that_cannot_be_opened_is_skipped() {
             json!({"layers": [{"source": format!("file://{}", missing.display())}]}),
         )
         .await;
-    // Deliberate: a run directory with one truncated output should still open
-    // the rest, so a layer that fails is reported and skipped, not fatal.
+    // This used to be a 200 with an empty layer list: the session was cleared
+    // before the new project was opened, so a project that opened nothing cost
+    // the user everything they had and told the client nothing was wrong.
+    // `POST /api/open` refuses before it clears; so does this now.
+    assert_eq!(res.status, 400, "{} {}", res.status, res.text());
+    assert!(
+        res.text().contains("gone.zarr"),
+        "the refusal says which layer and why: {}",
+        res.text()
+    );
+    assert_eq!(
+        api.layer_ids().await,
+        before,
+        "the layers that were open are still open"
+    );
+}
+
+#[actix_web::test]
+async fn a_project_that_names_no_layers_is_a_request_for_an_empty_session() {
+    let api = Api::with_labels().await;
+    let res = api.post("/api/project", json!({"layers": []})).await;
+    // Nothing failed here — nothing was asked for. An empty project is the one
+    // way to close every layer at once, and refusing it would make "clear the
+    // session" impossible to express.
     assert!(res.is_ok(), "{} {}", res.status, res.text());
     assert_eq!(res.json()["layers"], json!([]), "{}", res.text());
+    assert!(api.layer_ids().await.is_empty());
+}
+
+#[actix_web::test]
+async fn a_replaced_session_does_not_reuse_the_ids_it_replaced() {
+    let api = Api::with_labels().await;
+    let before = api.layer_ids().await;
+    let res = api
+        .post(
+            "/api/project",
+            json!({"layers": [{
+                "source": format!("file://{}", api.store.display()),
+                "role": "image",
+            }]}),
+        )
+        .await;
+    assert!(res.is_ok(), "{} {}", res.status, res.text());
+    // The new layers are opened alongside the old ones and the old ones dropped
+    // after, so their ids come *after* the ones that were in use. The tile
+    // cache is keyed by layer id, and an id that came back would name somebody
+    // else's tiles.
+    for id in api.layer_ids().await {
+        assert!(
+            !before.contains(&id),
+            "{id} was already used by this session"
+        );
+    }
 }
 
 #[actix_web::test]

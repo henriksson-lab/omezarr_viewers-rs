@@ -105,8 +105,25 @@ pub async fn table_column(
             "labels": labels,
             "values": values,
         })),
-        None => HttpResponse::BadRequest()
-            .body(format!("`{name}` is not a numeric column of this table")),
+        // The two ways to fail here are a typo and a type mismatch, and they
+        // used to be the same status and the same sentence — so a client could
+        // not tell "that column is not there" from "that column is there and
+        // cannot be a colour ramp". They are separated the way the layer routes
+        // separate theirs: a name nothing answers to is a 404 naming it, and
+        // something that is there but is the wrong kind is a 400 naming what it
+        // lacks.
+        None => match table.columns.column(&name) {
+            // Present, and not the numbers a ramp needs: `column_by_label`
+            // answers every numeric column, so a column that is here and was
+            // still declined is a text one.
+            Some(_) => HttpResponse::BadRequest().body(format!(
+                "column `{name}` of layer {id} is not numeric, and a colour ramp needs numbers"
+            )),
+            None => HttpResponse::NotFound().body(format!(
+                "no column `{name}` in layer {id} (columns: {})",
+                table.columns.names().join(", ")
+            )),
+        },
     }
 }
 
