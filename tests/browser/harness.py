@@ -55,13 +55,21 @@ def binary(name):
     raise RuntimeError(f"target/{{release,debug}}/{name} not built — run `make build`")
 
 
-def demo_store(directory):
+def demo_store(directory, depth=None):
     """Write the synthetic dataset the suites annotate.
 
     Generated rather than checked in: every value in it is known by arithmetic,
     which is the same reason the Rust fixtures are synthetic.
+
+    `depth` asks for more z planes than the default eight. The default is a
+    *slab*, which is the right cheap fixture for the xy work but tells a suite
+    about the z axis almost nothing: an orthogonal pane becomes eight rows
+    stretched over half a screen, and a box drawn to true proportions is a sheet.
     """
-    subprocess.run([binary("make_demo"), directory], check=True, capture_output=True)
+    command = [binary("make_demo"), directory]
+    if depth is not None:
+        command += ["--z", str(depth)]
+    subprocess.run(command, check=True, capture_output=True)
     return os.path.join(directory, "image.zarr")
 
 

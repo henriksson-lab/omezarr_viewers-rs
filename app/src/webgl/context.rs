@@ -111,7 +111,11 @@ fn compile_shader(
 }
 
 /// Link vertex and fragment shaders into a program.
-fn create_program(
+///
+/// Public to the crate because [`crate::cube_pane`] compiles a program of its
+/// own — the only 3D one here, and so not part of [`GlContext`]'s set — and has
+/// no reason to compile it differently.
+pub(crate) fn create_program(
     gl: &WebGl2RenderingContext,
     vs_source: &str,
     fs_source: &str,

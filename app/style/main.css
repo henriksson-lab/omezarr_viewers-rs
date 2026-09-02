@@ -454,6 +454,46 @@ body {
     border-top: 1px solid #0f3460;
 }
 
+/* --- the 2x2 slice grid --- */
+
+/* Four panels of equal weight. The fixed pane sizes above are what the panes
+   fall back to outside the grid; in it the tracks decide, so they are unset
+   rather than overridden with another number that would have to be kept in
+   step. `min-*: 0` on the children because a grid track's default `auto`
+   minimum is the content's size, and a canvas reports its attribute size — so
+   without it the panels only ever grow. */
+.viewer-area.grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 1px;
+    background: #0f3460;
+}
+
+.viewer-area.grid > * {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.viewer-area.grid .ortho-pane {
+    width: auto;
+    height: auto;
+    border: none;
+}
+
+.cube-pane {
+    position: relative;
+    background: #0d0d1a;
+}
+
+.cube-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: grab;
+}
+
 .ortho-canvas {
     width: 100%;
     height: 100%;

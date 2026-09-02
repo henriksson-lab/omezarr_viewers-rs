@@ -1,6 +1,7 @@
 mod api_client;
 mod app;
 mod controls;
+mod cube_pane;
 mod layers;
 mod ortho_pane;
 mod viewer_canvas;

@@ -18,6 +18,9 @@ pub enum ViewMsg {
     ProjectionDepth(u64),
     /// A click in an orthogonal pane, as fractions of the pane.
     OrthoPicked(&'static str, f32, f32),
+    /// One of the cube panel's planes was dragged: the axis it cuts, and where
+    /// it now cuts as a fraction of that axis.
+    CutMoved(&'static str, f32),
     ZSlice(u32),
     TIndex(u32),
     Camera(f32, f32, f32, f32, f32), // (pan_x, pan_y, zoom, canvas_w, canvas_h)
@@ -88,6 +91,23 @@ impl App {
                     _ => {
                         self.crosshair.1 = v * world.1;
                         self.z_slice = ((u * z_max) as u32).min(self.z_max.saturating_sub(1));
+                    }
+                }
+                self.load_tiles(ctx);
+                true
+            }
+            ViewMsg::CutMoved(axis, at) => {
+                // A fraction, because the cube panel knows the box's
+                // proportions and not its units: two axes are world pixels and
+                // the third is a count of planes.
+                let world = self.world_size();
+                let at = at.clamp(0.0, 1.0);
+                match axis {
+                    "x" => self.crosshair.0 = at * world.0,
+                    "y" => self.crosshair.1 = at * world.1,
+                    _ => {
+                        let last = self.z_max.saturating_sub(1);
+                        self.z_slice = ((at * self.z_max.max(1) as f32) as u32).min(last);
                     }
                 }
                 self.load_tiles(ctx);

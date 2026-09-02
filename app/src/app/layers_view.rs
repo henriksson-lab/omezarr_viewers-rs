@@ -14,6 +14,7 @@ use crate::controls::channel_panel::ChannelPanel;
 use crate::controls::label_panel::LabelPanel;
 use crate::controls::object_panel::ObjectPanel;
 use crate::controls::table_panel::TablePanel;
+use crate::cube_pane::CubePane;
 use crate::layers::{LayerState, LayerUi};
 use crate::ortho_pane::OrthoPane;
 use crate::viewer_canvas::{Tool, ViewerCanvas};
@@ -85,39 +86,44 @@ impl App {
             0.0
         };
 
+        // Four panels of equal weight: the xy slice with the tools on it, the
+        // two orthogonal slices, and the box saying where those three cuts sit.
+        // The xy panel keeps the full canvas rather than becoming a plain pane,
+        // because it is still the surface you draw on.
+        let grid = if self.ortho {
+            "viewer-area grid"
+        } else {
+            "viewer-area"
+        };
         html! {
-                <div class="viewer-area">
-                    <div class="viewer-row">
-                        <div class="viewer-main">
-                            <ViewerCanvas
-                                layers={self.render_infos()}
-                                world_size={world}
-                                on_canvas_ready={on_canvas_ready}
-                                on_camera_changed={on_camera_changed}
-                                on_pick={on_pick}
-                                tool={self.tool}
-                                on_draw={on_draw}
-                                editable={self.editable()}
-                                on_edit={on_edit}
-                            />
-                            { self.view_toolbar(ctx) }
-                            if self.ortho {
-                                <div class="crosshair-v" style={format!("left: {}%", crosshair.0 * 100.0)} />
-                                <div class="crosshair-h" style={format!("top: {}%", crosshair.1 * 100.0)} />
-                            }
-                        </div>
+                <div class={grid}>
+                    <div class="viewer-main">
+                        <ViewerCanvas
+                            layers={self.render_infos()}
+                            world_size={world}
+                            on_canvas_ready={on_canvas_ready}
+                            on_camera_changed={on_camera_changed}
+                            on_pick={on_pick}
+                            tool={self.tool}
+                            on_draw={on_draw}
+                            editable={self.editable()}
+                            on_edit={on_edit}
+                        />
+                        { self.view_toolbar(ctx) }
                         if self.ortho {
-                            <OrthoPane
-                                axis="x"
-                                transpose={true}
-                                t={self.t_index as u64}
-                                layers={self.ortho_layers("x")}
-                                crosshair={(z_fraction, crosshair.1)}
-                                on_pick={ctx.link().callback(|(u, v): (f32, f32)| ViewMsg::OrthoPicked("x", u, v))}
-                            />
+                            <div class="crosshair-v" style={format!("left: {}%", crosshair.0 * 100.0)} />
+                            <div class="crosshair-h" style={format!("top: {}%", crosshair.1 * 100.0)} />
                         }
                     </div>
                     if self.ortho {
+                        <OrthoPane
+                            axis="x"
+                            transpose={true}
+                            t={self.t_index as u64}
+                            layers={self.ortho_layers("x")}
+                            crosshair={(z_fraction, crosshair.1)}
+                            on_pick={ctx.link().callback(|(u, v): (f32, f32)| ViewMsg::OrthoPicked("x", u, v))}
+                        />
                         <OrthoPane
                             axis="y"
                             transpose={false}
@@ -125,6 +131,14 @@ impl App {
                             layers={self.ortho_layers("y")}
                             crosshair={(crosshair.0, z_fraction)}
                             on_pick={ctx.link().callback(|(u, v): (f32, f32)| ViewMsg::OrthoPicked("y", u, v))}
+                        />
+                        <CubePane
+                            world={world}
+                            depth={self.z_max}
+                            cut={(crosshair.0, crosshair.1, z_fraction)}
+                            on_cut={ctx.link().callback(|(axis, at): (&'static str, f32)| {
+                                ViewMsg::CutMoved(axis, at)
+                            })}
                         />
                     }
                 </div>
@@ -163,7 +177,7 @@ impl App {
                         <label>
                             <input type="checkbox" checked={self.ortho}
                                 onchange={ctx.link().callback(|_| ViewMsg::ToggleOrtho)} />
-                            {" Orthogonal panes"}
+                            {" Slice grid"}
                         </label>
                     </div>
                     <div class="slider-row">

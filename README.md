@@ -24,6 +24,17 @@ demo store, drives a real browser and draws the scene. It is a script rather
 than a picture somebody once took, because a screenshot that has drifted from
 the software is worse than none.
 
+### Slice grid
+
+A 2x2 layout: the `xy` view with the drawing tools on it, the two orthogonal
+slices, and a box drawn to the volume's true proportions showing where those
+three cuts sit. Dragging a plane in the box scrubs that axis.
+
+The box is deliberately not normalised to a cube — a 512x512x8 volume is a slab,
+and it should look like one. The camera is fixed and near-isometric rather than
+isometric: at true isometric all three axes project to the same length and the
+box reads as a hexagon with no way to tell `x` from `z`.
+
 ## What it shows
 
 | Layer kind | Read from |
