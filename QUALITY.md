@@ -1045,3 +1045,183 @@ same defect is pinned **locally** by
 container in a temp directory and reads its deepest level. It fails against the
 un-prefixed read path. That pairing is the shape to copy: the network suite
 finds what local fixtures cannot, and anything it finds gets a local test.
+
+---
+
+## 20. A `file://` URI wears the host's separator — and that is the right answer
+
+Two container tests failed on **Windows CI only**:
+
+```
+---- a_single_series_container_keeps_the_stores_plain_name ----
+assertion failed: session.layers()[0].spec.uri().ends_with("container.zarr/0")
+```
+
+`SourceSpec::child`, added for bioformats2raw containers, joins a `File` source
+with `PathBuf::join`; `uri()` renders that with `Display`. On Windows the URI is
+therefore `file://…container.zarr\0`, and an assertion that slices it on `/` is
+an assertion about Unix rather than about the layer. Same shape as the earlier
+Windows break, where five assertions hardcoded `/` against a parser that was
+already separator-agnostic.
+
+### The other fix was examined and declined
+
+Normalising `uri()` to always emit `/` is the tempting one — a `file://` URI with
+backslashes is not really a URI, and this string is a wire format: it becomes
+`LayerInfo::source` and the `source` of every saved project. Three findings
+against it, in increasing order of weight:
+
+* **It buys no behaviour.** Every consumer that takes a URI apart already splits
+  on both separators — `SourceSpec::short_name`/`extension`,
+  `geojson::split_uri_target`, `roi_table::split_uri_target`, the frontend's
+  `class_table_default` — and `SourceSpec::parse` is separator-blind in both
+  directions, since Windows accepts `/` in a path. Every other use is a log line
+  or an error context.
+* **It does not rescue the case that motivates it.** A project written on
+  Windows names `C:\data\run.zarr`; turning its slashes round makes
+  `C:/data/run.zarr`, which no Linux box can open either. Absolute host paths do
+  not port, and `Project::scan` already writes the bare host path as `source`
+  while normalising only the *name* — with a comment saying exactly that. Only
+  relative sources port, and those come from `Project::read`, not from `uri()`.
+* **Unconditionally, it is a bug.** On Unix `\` is an ordinary character in a
+  filename: `file:///data/we\ird.zarr` would round-trip to a different path,
+  inventing a directory. Doing it correctly means `#[cfg(windows)]` — a wire
+  format that depends on which host wrote it, which is the thing normalising was
+  supposed to remove.
+
+So the separator is **left alone and documented**, on `uri()` itself, with the
+rule for callers: read a URI back with `parse`, or split it on both separators;
+never slice it on `/`.
+
+### The tests, which run on Linux
+
+The two container assertions now compare `layer.spec` against
+`SourceSpec::File(store.join(series))` — the parsed value, not the rendered
+string, which is both host-independent and stricter, since it pins the whole
+path rather than a suffix. Three unit tests in `source.rs` pin the contract
+where the next such assertion gets written:
+
+* `a_file_childs_uri_wears_the_hosts_own_separator` — spelled with
+  `MAIN_SEPARATOR`, so it *states* the host-dependence instead of leaving it to
+  be discovered, and asserts the round trip that makes it harmless;
+* `a_remote_child_is_joined_with_a_slash_on_every_host` — HTTP and S3 are URIs
+  all the way down;
+* `a_backslash_in_a_unix_filename_is_a_character_and_survives` — the guard on
+  the declined fix, and the one that fails on **Linux** if anyone normalises.
+
+### Mutation check
+
+| break | what failed |
+|---|---|
+| `child()` ignores the name | both child unit tests, cleanly |
+| `uri()` replaces `\` with `/` | `a_backslash_in_a_unix_filename_…`, **on Linux** |
+| the container assertion names `OME/0` | both container tests, printing both paths |
+
+And one thing that turned out **not** to be expressible: making a layer keep the
+*container's* spec instead of the series'. `Session::add` re-detects a container
+and expands it again, so the mutant stack-overflows rather than mis-asserting —
+the child spec is what terminates the expansion, which is a stronger guarantee
+than the assertion was asking for.
+
+---
+
+## 21. The async half, tested without the internet
+
+Task 19 opened real public stores and found a real bug, but it is `#[ignore]`d —
+it reaches the IDR — so **nothing about the async reader ran in CI**, and it
+could say nothing at all about annotations, because no public store carries our
+annotation groups.
+
+Measured, not estimated, before this was written:
+
+| function | references in tests | successful call anywhere |
+|---|---|---|
+| `geojson::load_async` | 0 | no |
+| `geojson::list_async` | 0 | no |
+| `roi_table::read_async` | 0 | no |
+| `geojson::save_async` | 1 | no — the test asserts an error |
+| `roi_table::write_async` | 1 | no — the test asserts an error |
+
+Three of the five had never been called successfully by anything, while
+CLAUDE.md's capability table promised remote GeoJSON and remote ROI tables in
+both directions.
+
+- [x] **`server/tests/http_store.rs`** — a real `actix-web` + `actix-files`
+      server over a `TempDir`, bound to **`127.0.0.1:0` with the port read back
+      from the listener**. No new dependency, no network, and a gate in CI
+      rather than a weather report about somebody else's uptime. The port is
+      read back rather than derived from the pid for the reason
+      `tests/browser/cdp.py::free_port` gives: two suites that each *compute* a
+      port eventually collide, and the collision reads as a broken reader.
+- [x] **The image tests compare against the local read of the same store**,
+      byte for byte, at every pyramid level and in both encodings. "An HTTP read
+      succeeded" is not the claim; "the two paths return the same picture" is —
+      a remote read that fetched the wrong chunk comes back as a valid tile of
+      the wrong pixels.
+- [x] **The container resolution now has a CI test.** Task 17 recorded the async
+      half as "not covered: no remote fixture in this repo, and this did not
+      seem the place to introduce one". This is that fixture. It fails against
+      the un-prefixed read path *and* against a skipped container branch — the
+      two mutations that are the bug task 19 found and the branch task 17 added.
+- [x] **`list_async`, `load_async` and `read_async` are exercised for the
+      first time**: written with the local writer, read with the async reader,
+      compared. The ROI table carries a non-default voxel size, because the
+      scale is recorded in the *group attributes* and the coordinates in the
+      *payload* — a remote read that fetched one and not the other lands every
+      box at half its size, which is precisely what the mutation showed.
+- [x] Every assertion mutation-checked, each one failing exactly one test:
+      dotfiles hidden (only the v2 container fails), the async subset reversed,
+      the prefix dropped, `is_container` disabled, a level dropped, either
+      `list_async` emptied, `declared_space` forced false, a row dropped, the
+      recorded scale ignored, the missing-set message stripped of the name, and
+      a remote save faked as a success.
+
+### What this cannot cover, and it is half the table
+
+**opendal's HTTP backend is a read service.** Verified rather than assumed: it
+answers `write` with `Unsupported (permanent) at write … operation is not
+supported`. So `geojson::save_async` and `roi_table::write_async` **still have
+no successful execution anywhere in the test suite**, and CLAUDE.md's capability
+table promises both for `s3://` as well as `http(s)://`. Those two rows are
+half-covered: reads are now gated in CI, writes are not covered at all.
+
+`writing_to_an_http_store_is_refused_by_the_backend` pins that limit in code so
+it cannot be mistaken for coverage — if it ever fails because a write succeeded,
+the situation has changed and the module documentation is wrong.
+
+- [ ] **Prove the remote write path.** It needs an S3 emulator — MinIO or
+      `s3s`/`s3mock` in a `#[ignore]`d-by-default fixture, or a CI service
+      container — because the write is the half `--allow-remote-writes` exists
+      to gate, and a gate on an unexecuted path is a gate on nothing. The shape
+      to copy is this file's: write locally, act remotely, compare; and pair
+      anything it finds with a local test, as task 19 did.
+
+---
+
+## 22. A series name is a claim too
+
+Found by following up an aside in task 20's report: the container expansion
+terminates *only* because `SourceSpec::child` descends. `Session::add` opens
+each series and **re-detects a container in what it opens**, so a series name
+that does not go down a level makes it re-detect the store it was just handed.
+
+`{"series":[""]}` was measured at **exit 134** — a stack overflow, which
+*aborts* rather than unwinding, so the whole server goes down. A malformed or
+hostile store crashing the process is worse than any panic: nothing catches it.
+
+`"."` happened not to loop, terminating two levels in with `No multiscales
+metadata found` — by accident rather than by design, and with an error naming
+neither the real problem nor the file.
+
+The same rule as `table::read`'s counts, one level up: **a name read from a file
+is a claim**, and `""`, `"."`, `".."` and `"a/b"` are all the claim "the
+container is its own series". `descends` requires exactly one `Normal` path
+component, which also rules out an index reaching into a subdirectory it has no
+business naming. The index is **refused, not filtered** — dropping a bad entry
+would open a subset of a slide as though it were all of it, which is the
+argument that already makes several series a refusal.
+
+Guarded on both routes (the session's `series_of` and the direct-open branch in
+`read_metadata_*`), with three unit tests on the rule and an integration test
+per bad name. Verified by hand that all four are now exit 1 with the name in the
+message, and that a legitimate two-series container still opens as two layers.

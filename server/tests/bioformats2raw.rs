@@ -197,11 +197,12 @@ async fn each_layer_points_at_its_own_series_so_annotations_land_there() {
     );
     let (session, _) = open_into_session(&store).await;
     for (layer, series) in session.layers().iter().zip(["0", "1"]) {
-        assert!(
-            layer
-                .spec
-                .uri()
-                .ends_with(&format!("container.zarr/{series}")),
+        // On the spec, not on its rendered URI: a `File` URI carries the
+        // host's path separator, so `ends_with("container.zarr/0")` is an
+        // assertion about Unix rather than about the layer.
+        assert_eq!(
+            layer.spec,
+            SourceSpec::File(store.join(series)),
             "layer {} points at {}",
             layer.name,
             layer.spec.uri()
@@ -222,7 +223,7 @@ async fn a_single_series_container_keeps_the_stores_plain_name() {
     let (session, ids) = open_into_session(&store).await;
     assert_eq!(ids.len(), 1);
     assert_eq!(session.layers()[0].name, "container.zarr");
-    assert!(session.layers()[0].spec.uri().ends_with("container.zarr/0"));
+    assert_eq!(session.layers()[0].spec, SourceSpec::File(store.join("0")));
 }
 
 /// And an ordinary store is still one layer pointing at itself. `.zarr` is a
@@ -238,7 +239,7 @@ async fn an_ordinary_store_is_one_layer_that_points_at_itself() {
     let (session, ids) = open_into_session(&path).await;
     assert_eq!(ids.len(), 1);
     assert_eq!(session.layers()[0].name, "plain.zarr");
-    assert!(session.layers()[0].spec.uri().ends_with("plain.zarr"));
+    assert_eq!(session.layers()[0].spec, SourceSpec::File(path));
 }
 
 /// Series are **alternatives, not overlays**, and only the first arrives shown.
@@ -345,4 +346,41 @@ async fn pixels_come_back_from_a_store_opened_at_its_container_root() {
         values.iter().any(|v| *v != values[0]),
         "every pixel identical — the synthetic image has structure in it"
     );
+}
+
+/// A container whose index names itself is **refused**, not followed.
+///
+/// `Session::add` expands a container by opening each series, and it re-detects
+/// a container in what it opens. A series name that does not descend — `""`,
+/// `"."` — makes `SourceSpec::child` a no-op, so it re-detects the *same*
+/// store and recurses without bound. A stack overflow **aborts** rather than
+/// unwinding, so this was a malformed store taking the whole server down:
+/// measured at exit 134 before the guard existed.
+#[tokio::test]
+async fn a_series_index_that_does_not_descend_is_refused_rather_than_followed() {
+    for name in ["", ".", ".."] {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = container(
+            dir.path(),
+            &["0"],
+            Some(serde_json::json!({ "series": [name] })),
+        );
+        let registry = SourceRegistry::new();
+        let mut session = Session::new();
+        let error = session
+            .add(
+                &registry,
+                SourceSpec::File(store.clone()),
+                LayerRole::Auto,
+                None,
+                ObjectSpace::default(),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("series {name:?} should be refused"));
+        // `{:#}` for the whole chain: `to_string()` gives only the outermost
+        // context, which here is "opening <store>" and says nothing about why.
+        let error = format!("{error:#}");
+        assert!(error.contains("not a subgroup"), "series {name:?}: {error}");
+    }
 }

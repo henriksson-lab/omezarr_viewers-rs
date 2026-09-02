@@ -73,6 +73,21 @@ impl SourceSpec {
     }
 
     /// The URI form, round-tripping through [`SourceSpec::parse`].
+    ///
+    /// A `File` renders its path exactly as the host writes it, separators
+    /// included: on Windows this is `file://C:\data\run.zarr`. That is left
+    /// alone on purpose. `parse` is separator-blind, everything that takes a
+    /// URI apart splits on both ([`SourceSpec::short_name`],
+    /// `geojson::split_uri_target`, `roi_table::split_uri_target`, the
+    /// frontend's class-table default), and an absolute host path does not
+    /// become portable by having its slashes turned round — a project saved on
+    /// Windows names `C:\…`, which no Linux box can open either way. The
+    /// normalisation would also be *lossy* on Unix, where `\` is an ordinary
+    /// character in a filename and rewriting it invents a directory.
+    ///
+    /// So the rule for callers is: read a URI back with `parse`, or take it
+    /// apart on both separators. Slicing it on `/` works everywhere but
+    /// Windows, which is the one host that catches it.
     pub fn uri(&self) -> String {
         match self {
             SourceSpec::File(path) => format!("file://{}", path.display()),
@@ -342,6 +357,64 @@ mod tests {
         let spec = SourceSpec::parse(r"C:\\data\\run\\filled.npy").unwrap();
         assert_eq!(spec.short_name(), "filled.npy");
         assert_eq!(spec.extension().as_deref(), Some("npy"));
+    }
+
+    /// A `File` child is joined as a **path**, so its URI carries the host's
+    /// own separator: `container.zarr\0` on Windows. Nothing in production
+    /// minds — see [`SourceSpec::uri`] for why it is not normalised — but two
+    /// container tests asserted `ends_with("container.zarr/0")` and so passed
+    /// on every host but the one that could tell. This pins the behaviour
+    /// where the next such assertion gets written.
+    #[test]
+    fn a_file_childs_uri_wears_the_hosts_own_separator() {
+        let child = SourceSpec::parse("/data/container.zarr")
+            .unwrap()
+            .child("0");
+        assert_eq!(
+            child.uri(),
+            format!("file:///data/container.zarr{}0", std::path::MAIN_SEPARATOR)
+        );
+        // Which costs nothing, because a URI is read back and not sliced.
+        assert_eq!(SourceSpec::parse(&child.uri()).unwrap(), child);
+        assert_eq!(child.short_name(), "0");
+    }
+
+    /// The other two schemes are URIs all the way down: they join with `/` on
+    /// every host, so a container served over HTTP or S3 names its series the
+    /// same whatever machine the viewer runs on.
+    #[test]
+    fn a_remote_child_is_joined_with_a_slash_on_every_host() {
+        let http = SourceSpec::parse("https://example.com/container.zarr/").unwrap();
+        assert_eq!(
+            http.child("0").uri(),
+            "https://example.com/container.zarr/0"
+        );
+        let s3 = SourceSpec::parse("s3://bucket/container.zarr").unwrap();
+        assert_eq!(s3.child("0").uri(), "s3://bucket/container.zarr/0");
+    }
+
+    /// A `\` inside a Unix filename is a **character**, not a separator, and
+    /// survives the round trip. This is what rules out the other fix — writing
+    /// `uri()` to always emit `/`: done unconditionally it invents a directory
+    /// in paths like this one, and done under `cfg(windows)` the wire format
+    /// depends on which host wrote it, which is the thing normalising was for.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_unix_filename_is_a_character_and_survives() {
+        let spec = SourceSpec::File(PathBuf::from(r"/data/we\ird.zarr"));
+        assert_eq!(spec.uri(), r"file:///data/we\ird.zarr");
+        assert_eq!(SourceSpec::parse(&spec.uri()).unwrap(), spec);
+    }
+
+    /// And the series name comes back off a path written either way — which is
+    /// the question the container tests are actually asking, and the form in
+    /// which they can ask it on any host.
+    #[test]
+    fn a_childs_name_comes_back_off_a_path_written_either_way() {
+        for parent in [r"C:\data\container.zarr", "/data/container.zarr"] {
+            let child = SourceSpec::File(PathBuf::from(parent)).child("0");
+            assert_eq!(child.short_name(), "0", "parent `{parent}`");
+        }
     }
 
     #[test]

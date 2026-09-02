@@ -9,7 +9,7 @@
 //! array metadata, which is a file read on disk and a request over S3, and a
 //! viewer asks for tiles from the same level thousands of times in a row.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use omezarr_viewer_common::{ArrayInfo, DatasetInfo, DatasetMetadata, Multiscale, OmeroMetadata};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -316,10 +316,7 @@ impl ZarrStore {
                     return Ok(None);
                 };
                 let ome = Group::open(store, "/OME").ok();
-                Ok(container_series(
-                    root.attributes(),
-                    ome.as_ref().map(|g| g.attributes()),
-                ))
+                container_series(root.attributes(), ome.as_ref().map(|g| g.attributes()))
             }
             Some(op) => {
                 let store = Arc::new(AsyncOpendalStore::new(op));
@@ -327,10 +324,7 @@ impl ZarrStore {
                     return Ok(None);
                 };
                 let ome = Group::async_open(store, "/OME").await.ok();
-                Ok(container_series(
-                    root.attributes(),
-                    ome.as_ref().map(|g| g.attributes()),
-                ))
+                container_series(root.attributes(), ome.as_ref().map(|g| g.attributes()))
             }
         }
     }
@@ -685,15 +679,36 @@ fn is_container(attrs: &Attributes) -> bool {
 
 const LAYOUT_KEY: &str = "bioformats2raw.layout";
 
+/// Does this series name a subgroup *below* the container?
+///
+/// A name read from a file is a claim, and `""`, `"."` and `".."` are all
+/// claims that the container is its own series. `SourceSpec::child` would make
+/// them a no-op, and `Session::add` re-detects the container it was just
+/// handed — which is an unbounded recursion, and a stack overflow **aborts**
+/// rather than unwinding, so a malformed store takes the whole server with it.
+/// Measured: `{"series":[""]}` was exit 134.
+///
+/// One `Normal` component and nothing else: that also rules out `a/b`, which
+/// would escape into a subdirectory the index has no business naming.
+fn descends(name: &str) -> bool {
+    let mut components = std::path::Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 /// The series a container's `OME/.zattrs` lists, in its order.
 ///
 /// Same two shapes again: Java `bioformats2raw` writes `series` at the root of
 /// that file, `img2omezarr` wraps it under `ome`.
-fn series_list(ome_attrs: &Attributes) -> Vec<String> {
+///
+/// Refused rather than filtered when an entry does not descend: dropping it
+/// silently would open a subset of a slide as though it were the whole of it,
+/// which is the same argument that makes several series a refusal.
+fn series_list(ome_attrs: &Attributes) -> Result<Vec<String>> {
     let listed = ome_attrs
         .get("series")
         .or_else(|| ome_attrs.get("ome").and_then(|ome| ome.get("series")));
-    listed
+    let names: Vec<String> = listed
         .and_then(|v| v.as_array())
         .map(|items| {
             items
@@ -701,7 +716,15 @@ fn series_list(ome_attrs: &Attributes) -> Vec<String> {
                 .filter_map(|item| item.as_str().map(str::to_string))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for name in &names {
+        if !descends(name) {
+            bail!(
+                "this container's series index names {name:?}, which is not a subgroup inside it"
+            );
+        }
+    }
+    Ok(names)
 }
 
 /// The series a container holds, or `None` if this is an ordinary image.
@@ -709,16 +732,16 @@ fn series_list(ome_attrs: &Attributes) -> Vec<String> {
 /// An empty index still means one series: `bioformats2raw` puts the first at
 /// `0` whether or not it wrote the index, and the spec only makes the index a
 /// SHOULD.
-fn container_series(root: &Attributes, ome: Option<&Attributes>) -> Option<Vec<String>> {
+fn container_series(root: &Attributes, ome: Option<&Attributes>) -> Result<Option<Vec<String>>> {
     if !is_container(root) {
-        return None;
+        return Ok(None);
     }
-    let listed = ome.map(series_list).unwrap_or_default();
-    Some(if listed.is_empty() {
+    let listed = ome.map(series_list).transpose()?.unwrap_or_default();
+    Ok(Some(if listed.is_empty() {
         vec!["0".to_string()]
     } else {
         listed
-    })
+    }))
 }
 
 /// Which series to open, given what the index said.
@@ -771,9 +794,10 @@ fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<(DatasetInfo, Att
 
     // A container names the image; an ordinary store *is* one.
     let (attrs, prefix) = if is_container(&root_attrs) {
-        let index = Group::open(store.clone(), "/OME")
-            .map(|g| series_list(g.attributes()))
-            .unwrap_or_default();
+        let index = match Group::open(store.clone(), "/OME") {
+            Ok(group) => series_list(group.attributes())?,
+            Err(_) => Vec::new(),
+        };
         let series = choose_series(&index)?;
         let path = format!("/{series}");
         let group = Group::open(store.clone(), &path)
@@ -813,7 +837,7 @@ async fn read_metadata_async(
     // fetching differs, which is the shape of most of this file.
     let (attrs, prefix) = if is_container(&root_attrs) {
         let index = match Group::async_open(store.clone(), "/OME").await {
-            Ok(group) => series_list(group.attributes()),
+            Ok(group) => series_list(group.attributes())?,
             Err(_) => Vec::new(),
         };
         let series = choose_series(&index)?;
@@ -935,7 +959,7 @@ pub fn bytes_to_f32(raw: &[u8], dtype: &str) -> Result<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_series, is_container, series_list};
+    use super::{choose_series, descends, is_container, series_list};
     use serde_json::json;
 
     fn attrs(value: serde_json::Value) -> super::Attributes {
@@ -964,20 +988,50 @@ mod tests {
         assert!(!is_container(&attrs(json!({}))));
     }
 
+    /// A series name is a claim read from a file, and these four are all the
+    /// claim "the container is its own series". `SourceSpec::child` makes them
+    /// a no-op and `Session::add` re-detects the container it was just handed,
+    /// so the recursion never bottoms out — and a stack overflow **aborts**
+    /// rather than unwinding. `{"series":[""]}` was a measured exit 134.
+    #[test]
+    fn a_series_name_that_does_not_descend_is_not_a_series() {
+        for name in ["", ".", "..", "a/b", "../sibling", "/absolute"] {
+            assert!(!descends(name), "{name:?} was accepted as a series");
+        }
+    }
+
+    /// And ordinary names still are. Not every producer numbers from zero.
+    #[test]
+    fn an_ordinary_subgroup_name_descends() {
+        for name in ["0", "12", "scene-A", "well_B3"] {
+            assert!(descends(name), "{name:?} was refused as a series");
+        }
+    }
+
+    /// The index is refused, not filtered: dropping a bad entry would open a
+    /// subset of a slide as though it were the whole of it.
+    #[test]
+    fn an_index_with_one_bad_entry_is_refused_by_name() {
+        let error = series_list(&attrs(json!({"series": ["0", ""]})))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a subgroup"), "{error}");
+    }
+
     /// The series index has the same two shapes: Java `bioformats2raw` writes
     /// `series` at the root of `OME/.zattrs`, `img2omezarr` wraps it under
     /// `ome`.
     #[test]
     fn the_series_index_is_read_from_either_shape() {
         assert_eq!(
-            series_list(&attrs(json!({"series": ["0", "1"]}))),
+            series_list(&attrs(json!({"series": ["0", "1"]}))).unwrap(),
             vec!["0", "1"]
         );
         assert_eq!(
-            series_list(&attrs(json!({"ome": {"series": ["0", "1"]}}))),
+            series_list(&attrs(json!({"ome": {"series": ["0", "1"]}}))).unwrap(),
             vec!["0", "1"]
         );
-        assert!(series_list(&attrs(json!({}))).is_empty());
+        assert!(series_list(&attrs(json!({}))).unwrap().is_empty());
     }
 
     /// One series is opened without asking: a container holding a single image
