@@ -336,7 +336,8 @@ impl App {
         if let Some(cs) = &self.canvas_state {
             if let Some(ref mut state) = *cs.borrow_mut() {
                 let live: HashSet<String> = live.clone();
-                state.tile_cache.retain(|key, _| live.contains(&key.layer));
+                let freed = state.tile_cache.retain(|key| live.contains(&key.layer));
+                state.renderer.delete_tiles(freed);
                 let dead: Vec<String> = state
                     .point_buffers
                     .keys()

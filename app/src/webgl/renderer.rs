@@ -344,6 +344,18 @@ impl Renderer {
         Ok(())
     }
 
+    /// Free tile textures the store has evicted.
+    ///
+    /// The only place a tile's GPU memory is actually released. Dropping a
+    /// `TileTexture` frees the JS handle and leaves the texture for the garbage
+    /// collector, which cannot see VRAM pressure and has no reason to run when
+    /// the JS heap has not grown — so eviction has to say so explicitly.
+    pub fn delete_tiles(&self, textures: Vec<TileTexture>) {
+        for texture in textures {
+            self.ctx.gl.delete_texture(Some(&texture.texture));
+        }
+    }
+
     /// Drop a layer's colour table, so its ids go back to the hash colouring.
     ///
     /// Needed because a measurement colouring is *installed* over whatever the

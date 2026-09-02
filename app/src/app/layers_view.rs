@@ -666,11 +666,21 @@ impl App {
     }
 
     fn view_status(&self) -> Html {
-        let cached = self
+        // Tiles *and* the megabytes they hold. The count alone says nothing
+        // about VRAM — eight tiles of a 2048-wide store cost far more than
+        // eight of a 256-wide one — and VRAM is the thing with a limit.
+        let (cached, cached_mb) = self
             .canvas_state
             .as_ref()
-            .and_then(|cs| cs.borrow().as_ref().map(|s| s.tile_cache.len()))
-            .unwrap_or(0);
+            .and_then(|cs| {
+                cs.borrow().as_ref().map(|s| {
+                    (
+                        s.tile_cache.len(),
+                        s.tile_cache.bytes() as f64 / 1_048_576.0,
+                    )
+                })
+            })
+            .unwrap_or((0, 0.0));
         let world = self.world_size();
         html! {
             <>
@@ -680,9 +690,9 @@ impl App {
                     html!{ <p>{format!("{}: level {} / {}", layer.name, level, layer.num_levels().saturating_sub(1))}</p> }
                 })}
                 if self.tiles_pending > 0 {
-                    <p>{format!("Tiles: {} cached, {} pending", cached, self.tiles_pending)}</p>
+                    <p>{format!("Tiles: {cached} cached ({cached_mb:.0} MB), {} pending", self.tiles_pending)}</p>
                 } else {
-                    <p>{format!("Tiles: {} cached", cached)}</p>
+                    <p>{format!("Tiles: {cached} cached ({cached_mb:.0} MB)")}</p>
                 }
                 if let Some(ref picked) = self.picked {
                     <p>{format!("{}: id {} ({}) at ({:.0}, {:.0})",

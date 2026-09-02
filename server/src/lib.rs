@@ -6,6 +6,11 @@
 pub mod annotations;
 pub mod api;
 pub mod cache;
+/// Measurement scaffolding for the chunk-reuse question; see the module docs.
+#[cfg(test)]
+mod chunk_probe;
+#[cfg(test)]
+mod chunk_reuse;
 pub mod convert;
 pub mod npy_header;
 pub mod npy_volume;

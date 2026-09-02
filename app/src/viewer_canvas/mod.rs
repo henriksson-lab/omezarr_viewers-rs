@@ -257,9 +257,157 @@ pub struct LevelTileInfo {
 }
 
 /// Shared mutable state between App (tile uploads) and ViewerCanvas (rendering).
+/// How much GPU memory tile textures may hold.
+///
+/// A number rather than a query, because WebGL2 offers no way to ask how much
+/// VRAM there is or how much is left. Chosen to be comfortable on an integrated
+/// GPU while leaving room for the label textures, the annotation buffers and
+/// whatever else the page is doing; the geometric rule normally keeps the store
+/// far below it, and this only decides what happens when it does not.
+pub const TILE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+/// Tile textures held on the GPU, with a byte budget.
+///
+/// Two things this fixes, and they are different problems.
+///
+/// **Textures were never freed explicitly.** `TileTexture` holds a
+/// `WebGlTexture` and nothing implemented `Drop`, so dropping one released the
+/// JS handle and left the GPU memory to be reclaimed whenever the JS garbage
+/// collector next ran. That is not a leak — WebGL ties the object's lifetime to
+/// its wrapper — but the collector cannot see VRAM pressure, and a wasm app
+/// that drops two hundred megabytes of textures has not grown the JS heap at
+/// all, so nothing prompts it. Every removal here hands the texture back to the
+/// caller, which deletes it; that is the only reason `evict` and `retain`
+/// return what they dropped instead of dropping it themselves.
+///
+/// **Nothing capped the total.** Eviction was geometric only — keep this level
+/// and coarser, and within a level only what is on screen. That is the right
+/// *primary* rule, because it encodes what is actually visible. The budget is a
+/// backstop under it, for the case the geometry alone does not bound: a large
+/// window, a fine level and several channels.
+///
+/// Recency is by **insertion**, not by use. Tracking use would mean a mutable
+/// borrow on every lookup in the draw path, and it would buy little: the
+/// geometric rule has already decided what is visible, so the budget is only
+/// choosing which *off-screen fallback* to give up, and the oldest is a fair
+/// answer to that.
+pub struct TileStore<T = TileTexture> {
+    entries: HashMap<TileKey, Held<T>>,
+    /// Bytes of texture currently held, by the same arithmetic the uploads use.
+    held: usize,
+    /// Monotonic insertion counter; the smallest is evicted first.
+    clock: u64,
+    capacity: usize,
+}
+
+struct Held<T> {
+    texture: T,
+    bytes: usize,
+    inserted: u64,
+}
+
+impl<T> TileStore<T> {
+    pub fn new(capacity_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            held: 0,
+            clock: 0,
+            capacity: capacity_bytes,
+        }
+    }
+
+    pub fn get(&self, key: &TileKey) -> Option<&T> {
+        self.entries.get(key).map(|held| &held.texture)
+    }
+
+    pub fn contains_key(&self, key: &TileKey) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Bytes of GPU texture this is holding.
+    pub fn bytes(&self) -> usize {
+        self.held
+    }
+
+    /// Add a tile, returning any texture the caller must now delete — the one
+    /// it replaced, plus whatever the budget pushed out.
+    #[must_use = "the returned textures are still on the GPU until deleted"]
+    pub fn insert(&mut self, key: TileKey, texture: T, width: u32, height: u32) -> Vec<T> {
+        let bytes = bytes_for(width, height);
+        let mut freed = Vec::new();
+        self.clock += 1;
+        let held = Held {
+            texture,
+            bytes,
+            inserted: self.clock,
+        };
+        if let Some(old) = self.entries.insert(key, held) {
+            self.held -= old.bytes;
+            freed.push(old.texture);
+        }
+        self.held += bytes;
+        freed.extend(self.trim());
+        freed
+    }
+
+    /// Keep only what `keep` says, returning the rest to be deleted.
+    #[must_use = "the returned textures are still on the GPU until deleted"]
+    pub fn retain(&mut self, keep: impl Fn(&TileKey) -> bool) -> Vec<T> {
+        let doomed: Vec<TileKey> = self
+            .entries
+            .keys()
+            .filter(|key| !keep(key))
+            .cloned()
+            .collect();
+        doomed
+            .into_iter()
+            .filter_map(|key| self.remove(&key))
+            .collect()
+    }
+
+    fn remove(&mut self, key: &TileKey) -> Option<T> {
+        let held = self.entries.remove(key)?;
+        self.held -= held.bytes;
+        Some(held.texture)
+    }
+
+    /// Drop the oldest until the budget is met.
+    fn trim(&mut self) -> Vec<T> {
+        let mut freed = Vec::new();
+        while self.capacity > 0 && self.held > self.capacity {
+            let Some(victim) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, held)| held.inserted)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(texture) = self.remove(&victim) {
+                freed.push(texture);
+            }
+        }
+        freed
+    }
+}
+
+/// What one tile costs on the GPU.
+///
+/// Both texture kinds are one 32-bit channel — `R32F` for intensity, `R32UI`
+/// for labels, which is why an id above 2^24 survives — so the arithmetic is
+/// the same for each and there is nothing to estimate. An exact size is what
+/// makes a byte budget enforceable rather than advisory.
+pub fn bytes_for(width: u32, height: u32) -> usize {
+    width as usize * height as usize * 4
+}
+
 pub struct ViewerCanvasState {
     pub renderer: Renderer,
-    pub tile_cache: HashMap<TileKey, TileTexture>,
+    pub tile_cache: TileStore,
     /// Grid metadata per `(layer id, level)`.
     pub level_info: HashMap<(String, usize), LevelTileInfo>,
     /// The level each layer is currently drawing at.
@@ -476,3 +624,95 @@ pub(crate) fn segment_distance(x: f32, y: f32, a: (f32, f32), b: (f32, f32)) -> 
 }
 
 impl ViewerCanvas {}
+
+#[cfg(test)]
+mod tile_store_tests {
+    use super::*;
+
+    /// A texture handle is a JS object we cannot make on the host, so the
+    /// accounting is tested through the one thing that decides it — the width
+    /// and height — with the handle supplied by the caller in real use.
+    fn key(level: usize, x: u32) -> TileKey {
+        TileKey {
+            layer: "L0".into(),
+            level,
+            tile_y: 0,
+            tile_x: x,
+            channel: 0,
+        }
+    }
+
+    #[test]
+    fn a_tile_costs_its_pixels_and_nothing_is_guessed() {
+        // Both kinds are one 32-bit channel, so the arithmetic is exact rather
+        // than an estimate — which is the whole reason a byte budget is
+        // enforceable here at all.
+        assert_eq!(bytes_for(256, 256), 256 * 256 * 4);
+        assert_eq!(bytes_for(1024, 512), 1024 * 512 * 4);
+    }
+
+    #[test]
+    fn the_budget_evicts_the_oldest_and_the_accounting_follows() {
+        let mut store: TileStore<()> = TileStore::new(bytes_for(256, 256) * 2);
+        assert_eq!(store.bytes(), 0);
+
+        let _ = store.insert(key(0, 0), (), 256, 256);
+        let _ = store.insert(key(0, 1), (), 256, 256);
+        assert_eq!(store.len(), 2, "two fit exactly");
+        assert_eq!(store.bytes(), bytes_for(256, 256) * 2);
+
+        let freed = store.insert(key(0, 2), (), 256, 256).len();
+        assert_eq!(freed, 1, "the third pushes one out");
+        assert_eq!(store.len(), 2);
+        assert_eq!(
+            store.bytes(),
+            bytes_for(256, 256) * 2,
+            "held follows evictions"
+        );
+        assert!(!store.contains_key(&key(0, 0)), "the oldest went");
+        assert!(store.contains_key(&key(0, 2)), "the newest stayed");
+    }
+
+    #[test]
+    fn replacing_a_tile_does_not_double_count_it() {
+        // The bug this guards: `held` growing on every re-upload of the same
+        // tile, so a camera nudged back and forth reports a cache far larger
+        // than it is and evicts things it did not need to.
+        let mut store: TileStore<()> = TileStore::new(0);
+        let _ = store.insert(key(0, 0), (), 128, 128);
+        let freed = store.insert(key(0, 0), (), 128, 128).len();
+        assert_eq!(
+            freed, 1,
+            "the replaced texture is handed back to be deleted"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.bytes(),
+            bytes_for(128, 128),
+            "counted once, not twice"
+        );
+    }
+
+    #[test]
+    fn a_zero_budget_means_no_budget_rather_than_no_tiles() {
+        // `0` is the server cache's own convention for "uncapped", and a store
+        // that evicted everything at zero would draw nothing at all.
+        let mut store: TileStore<()> = TileStore::new(0);
+        for x in 0..8 {
+            let _ = store.insert(key(0, x), (), 512, 512);
+        }
+        assert_eq!(store.len(), 8);
+    }
+
+    #[test]
+    fn retain_hands_back_everything_it_dropped() {
+        let mut store: TileStore<()> = TileStore::new(0);
+        for x in 0..4 {
+            let _ = store.insert(key(0, x), (), 64, 64);
+        }
+        let dropped = store.retain(|key| key.tile_x < 2).len();
+        assert_eq!(dropped, 2, "each dropped texture must reach delete_tiles");
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.bytes(), bytes_for(64, 64) * 2);
+    }
+}

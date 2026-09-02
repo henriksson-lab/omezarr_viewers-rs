@@ -86,6 +86,12 @@ pub struct OmeroRdefs {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrayInfo {
     pub shape: Vec<u64>,
+    /// The **shape of one chunk**, per axis — not how many chunks there are.
+    ///
+    /// Spelled out because the two are easy to confuse and the confusion is
+    /// silent: the client tiles by this, and a chunk count is small enough that
+    /// the tile size clamp swallowed it, so every store was read at one tile
+    /// size regardless of how it was written.
     pub chunks: Vec<u64>,
     pub dtype: String,
     /// Byte order: "<" little-endian, ">" big-endian

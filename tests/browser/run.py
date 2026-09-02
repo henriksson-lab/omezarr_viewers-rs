@@ -25,7 +25,7 @@ from cdp import ORIGIN_CHECK_FROM, Browser, chrome_version  # noqa: E402
 from harness import Checks, Server, Viewer, binary, demo_store  # noqa: E402
 
 SUITES = ["drawing", "editing", "classes", "hierarchy", "formats", "tables", "picking",
-          "classing", "grid"]
+          "classing", "grid", "caching"]
 
 
 def feature_table(store):
@@ -66,7 +66,7 @@ def run_suite(module, shots, keep):
     checks = Checks(module.NAME)
     server = viewer = None
     try:
-        store = demo_store(directory, getattr(module, "NEEDS_DEPTH", None))
+        store = demo_store(directory, getattr(module, "NEEDS_SHAPE", None))
         layers = []
         if getattr(module, "NEEDS_FEATURE_TABLE", False):
             feature_table(store)

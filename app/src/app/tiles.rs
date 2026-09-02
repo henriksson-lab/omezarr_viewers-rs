@@ -170,7 +170,9 @@ impl App {
                         };
                         match uploaded {
                             Ok(tex) => {
-                                state.tile_cache.insert(key, tex);
+                                let (tw, th) = (tex.width, tex.height);
+                                let freed = state.tile_cache.insert(key, tex, tw, th);
+                                state.renderer.delete_tiles(freed);
                             }
                             Err(e) => log::warn!("Upload tile: {}", e),
                         }
@@ -384,7 +386,7 @@ impl App {
         state
             .level_info
             .retain(|(id, l), _| id != &layer.id || *l >= level);
-        state.tile_cache.retain(|key, _| {
+        let freed = state.tile_cache.retain(|key| {
             if key.layer != layer.id {
                 return true;
             }
@@ -396,6 +398,7 @@ impl App {
                 && key.tile_y >= ty_min
                 && key.tile_y < ty_max
         });
+        state.renderer.delete_tiles(freed);
     }
 
     /// Ask the server for every tile in `area` that is not already here or on

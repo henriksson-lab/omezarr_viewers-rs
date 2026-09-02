@@ -110,6 +110,44 @@ async fn regions_fixture() -> (Api, String, String) {
 // -- /api/tile ---------------------------------------------------------------
 
 #[actix_web::test]
+async fn info_reports_the_shape_of_a_chunk_not_how_many_there_are() {
+    // These are easy to confuse and the confusion is silent: the client tiles
+    // by this number, and a chunk *count* is small enough that its
+    // `clamp(256, 2048)` swallowed it, so every store was read at 256 whatever
+    // it was written at — decoding a 512-chunked store four times over.
+    let api = Api::image().await;
+    let info = api.get("/api/info").await.json();
+    let chunks = info["arrays"][0]["chunks"]
+        .as_array()
+        .expect("an array of chunk extents")
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect::<Vec<_>>();
+    let shape = info["arrays"][0]["shape"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(chunks.len(), shape.len(), "one extent per axis");
+    // The discriminating check: a chunk count is `ceil(shape / chunk)` and so
+    // is *smaller* than the chunk on any axis with more than one chunk. The y
+    // and x axes of the synthetic store are chunked well below their extent.
+    let (y, x) = (chunks[chunks.len() - 2], chunks[chunks.len() - 1]);
+    assert!(
+        y > 1 && x > 1,
+        "a chunk spans more than one pixel; got {chunks:?} for shape {shape:?}"
+    );
+    for (axis, (&chunk, &extent)) in chunks.iter().zip(&shape).enumerate() {
+        assert!(
+            chunk <= extent,
+            "axis {axis}: a chunk ({chunk}) cannot be larger than the array ({extent})"
+        );
+    }
+}
+
+#[actix_web::test]
 async fn a_tile_is_an_octet_stream_of_exactly_the_pixels_that_were_asked_for() {
     let api = Api::image().await;
     let res = api.get("/api/tile?level=0&z=0&y=0&x=0&h=32&w=48").await;

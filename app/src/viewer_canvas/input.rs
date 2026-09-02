@@ -18,6 +18,7 @@ use super::{
     camera_world, segment_distance, Camera2d, Drawn, EditKind, Editing, Handle, Tool, ViewerCanvas,
     ViewerCanvasState, ViewerMsg,
 };
+use super::{TileStore, TILE_BUDGET_BYTES};
 
 impl ViewerCanvas {
     /// Take hold of the canvas element and build the renderer on it.
@@ -35,7 +36,7 @@ impl ViewerCanvas {
                         renderer.clear();
                         let state = ViewerCanvasState {
                             renderer,
-                            tile_cache: HashMap::new(),
+                            tile_cache: TileStore::new(TILE_BUDGET_BYTES),
                             level_info: HashMap::new(),
                             current_level: HashMap::new(),
                             point_buffers: HashMap::new(),

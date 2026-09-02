@@ -14,7 +14,7 @@ import json
 import time
 
 NAME = "grid"
-NEEDS_DEPTH = 192
+NEEDS_SHAPE = (192, 384, 384)
 
 
 def cube_rect(viewer):

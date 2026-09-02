@@ -315,6 +315,8 @@ impl ZarrStore {
 
     /// Read a rectangular tile and encode it for the wire.
     pub async fn read_tile_bytes(&self, request: &TileRequest) -> Result<TileBytes> {
+        #[cfg(test)]
+        let _probe = crate::chunk_probe::route("tile:xy");
         let dtype = self.level_dtype(request.level)?;
         let (raw, planes) = self.read_raw(request).await?;
 
@@ -349,6 +351,15 @@ impl ZarrStore {
     /// crosses every chunk row of the store, so it is worth reading once at a
     /// level that fits the pane rather than tiling it.
     pub async fn read_plane(&self, request: &PlaneRequest) -> Result<PlaneBytes> {
+        // Per *pane* rather than per route: `/api/slice` serves two of the
+        // grid's panels, and "did the panes share chunks" is unanswerable if
+        // both of them count as one asker.
+        #[cfg(test)]
+        let _probe = crate::chunk_probe::route(match request.axis {
+            PlaneAxis::Z => "slice:xy",
+            PlaneAxis::Y => "slice:xz",
+            PlaneAxis::X => "slice:yz",
+        });
         let dtype = self.level_dtype(request.level)?;
         let (height, width) = self.plane_shape(request.level, request.axis)?;
         let tile = TileRequest {
@@ -505,6 +516,8 @@ impl ZarrStore {
                         array
                     }
                 };
+                #[cfg(test)]
+                crate::chunk_probe::record(Arc::as_ptr(store) as usize, level, &array, subset);
                 let bytes = array
                     .retrieve_array_subset(subset)
                     .context("Failed to retrieve array subset")?;
@@ -527,6 +540,8 @@ impl ZarrStore {
                         array
                     }
                 };
+                #[cfg(test)]
+                crate::chunk_probe::record(Arc::as_ptr(store) as usize, level, &array, subset);
                 let bytes = array
                     .async_retrieve_array_subset(subset)
                     .await
@@ -671,9 +686,19 @@ async fn read_metadata_async(store: &Arc<AsyncOpendalStore>) -> Result<(DatasetI
 fn array_info<T: ?Sized>(shape: &[u64], array: &Array<T>) -> ArrayInfo {
     ArrayInfo {
         shape: shape.to_vec(),
+        // The chunk *shape*, not the chunk grid's. `chunk_grid_shape` is how
+        // many chunks there are along each axis, which is what this used to
+        // send and is not a thing the client can tile by: it fed
+        // `chunk_w.clamp(256, 2048)`, and a count is below 256 for any sane
+        // store, so every store was tiled at 256 whatever it was chunked at.
+        // A 512-chunked store then decoded each chunk four times, once per
+        // overlapping tile, and nothing looked wrong.
+        //
+        // Chunk 0's shape stands for all of them: a regular grid has one, and
+        // for an irregular one there is no single answer to send.
         chunks: array
-            .chunk_grid_shape()
-            .map(|s| s.to_vec())
+            .chunk_shape(&vec![0; shape.len()])
+            .map(|s| s.iter().map(|n| n.get()).collect())
             .unwrap_or_default(),
         dtype: format!("{}", array.data_type()),
         order: None,
