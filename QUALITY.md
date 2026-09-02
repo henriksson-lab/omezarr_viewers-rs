@@ -533,8 +533,9 @@ The real remaining debt is not duplication:
 - [x] `server/src/annotations/geojson.rs` (1116 by the time it was done — it had
       grown to 1116 from 990 while the supervision work went in) is split; see
       task 14. `src/annotation.rs` (1049) is still unsplit.
-- [ ] The parsers are still unfuzzed — the item task 5 deferred, whose
-      precondition (a stable home for them) has been met since.
+- [x] The parsers are still unfuzzed — the item task 5 deferred, whose
+      precondition (a stable home for them) has been met since. Done in task 15,
+      and it found a panic on its first run.
 
 
 ---
@@ -689,8 +690,358 @@ Verified as a move rather than a rewrite: every function, constant and struct in
 the original is present afterwards, and so is every test, both checked by diffing
 the item lists against `git show HEAD:`. 115/115 browser checks still pass.
 
-- [ ] `src/annotation.rs` (1049) is next, and splits the same way: `geometry.rs`
-      for the `Geometry` algebra and its helpers (~330), `mod.rs` for
-      `Annotation`, `Plane` and `ObjectType` (~260), `hierarchy.rs` for
-      `pick_annotation` / `containing_parent` / `in_tree_order` (~105) — the
-      smallest-covering-shape rule, which is a different idea from the shapes.
+- [x] Superseded by task 16, which measured a worse gap than file size:
+      `input.rs` had 637 lines of interaction rules and no tests. The split plan
+      for `src/annotation.rs` still stands — `geometry.rs` for the `Geometry`
+      algebra and its helpers (~330), `mod.rs` for `Annotation`, `Plane` and
+      `ObjectType` (~260), `hierarchy.rs` for `pick_annotation` /
+      `containing_parent` / `in_tree_order` (~105), the smallest-covering-shape
+      rule being a different idea from the shapes — and is the next one.
+
+---
+
+## 15. Fuzzing the parsers, which found a panic on the first run
+
+Three entry points take bytes this viewer did not write, from `file://`,
+`http(s)://` and `s3://` alike: `geojson::parse`, `objects::table::read`, and
+`npy_header::split`/`classify`. A malformed file should come back as an **error**, because
+an error names the file and the number that was wrong.
+
+**What a panic here actually costs, measured rather than assumed:** nothing sets
+`panic = "abort"`, so a panic unwinds. The server stays up and the client gets a
+dropped connection instead of a message, and the log says `capacity overflow`
+rather than which file was bad. That is a *robustness and diagnosability*
+argument, not a safety one — worth ten lines of checking, not worth dressing up
+as more than it is.
+
+### What it found
+
+`server/tests/parser_fuzz.rs` failed on its first execution with `capacity
+overflow`, out of `Vec::with_capacity` in `table::read`. Chasing it turned up
+three instances of one mistake:
+
+* `Vec::with_capacity(column_count)` — the count is a `u64` **the file chooses**.
+* `row_count * width` — a row count near `usize::MAX` overflows the multiply.
+  In debug that panics outright. In release it wraps, and the wrapped product
+  can match the words present — but a wrap needs `row_count >= 2^62`, and that
+  value then reaches `Vec::with_capacity`, whose product with the element size
+  exceeds `isize::MAX`. So it is a capacity-overflow panic there too. **There is
+  no input that makes this return wrong rows** — an earlier draft of this
+  section claimed there was, and working it through says otherwise.
+* `at + name_words` — a name length near `usize::MAX` overflows the range's end
+  and indexes from zero.
+
+One case does not panic and is worth naming: a count like `1 << 30` is
+representable, so `Vec::with_capacity` succeeds and quietly reserves ~25 GB of
+address space under Linux overcommit before the length check rejects the file.
+Harmless on a workstation; an OOM kill under a cgroup memory limit.
+
+All three are now checked before anything allocates or multiplies, and each has
+a named regression test rather than a committed crash file: a test called
+`a_column_count_larger_than_the_blob_is_refused_rather_than_allocated` says what
+was wrong and `crash-8f3a…` does not. The three were verified to **fail without
+the guards** — two capacity overflows and a slice index panic — because a guard
+test that passes either way is worth nothing.
+
+`geojson::parse` and the `.npy` header parser came through clean. That is a real
+result rather than a null one: `serde_json` enforces its own nesting limit, so
+the recursion over `childObjects` cannot be driven deep enough to overflow the
+stack, which was the specific worry.
+
+### Two halves, because they answer different questions
+
+**`server/tests/parser_fuzz.rs`** runs on every `make test`: a fixed generator,
+a fixed seed, 20,000 mutations per parser, about a second. Deterministic on
+purpose — a fuzz failure nobody can reproduce is a flake, and a flake in CI gets
+muted. `FUZZ_CASES` and `FUZZ_SEED` widen it on demand.
+
+**`fuzz/`** holds libFuzzer targets over the same three entry points for the
+deep search, run with `make fuzz`. It is its own workspace so CI's stable
+`cargo clippy --workspace` never tries to build it.
+
+The mutations are not random bytes. Random bytes are rejected by the first
+length check and never reach the code that indexes; what finds bugs is a
+*nearly* valid file — magic word intact, one count absurd — so the seeds are
+real files (the golden `fragments.bftable`, a genuine QuPath export) and one
+mutation deliberately sets an aligned word to `u64::MAX`, `1 << 60` and friends.
+
+### Run it in debug as well as release
+
+Release turns arithmetic overflow checks **off**, and two of the three bugs only
+panic with them on: a 3.2M-case release sweep across eight seeds was clean while
+the bugs were still present. The clean runs that count are the debug ones.
+(cargo-fuzz builds with `-Cdebug-assertions`, so the libFuzzer targets have them
+either way.)
+
+Totals after the fixes: 600k deterministic debug cases across four seeds, and
+**12.9M libFuzzer executions** — 5.7M table, 2.5M geojson, 4.7M npy_header — all
+clean.
+
+---
+
+## 16. The interaction logic, which had no tests at all
+
+Measured rather than assumed. Three files had **zero** unit tests:
+
+| file | lines | tests | is that wrong? |
+|---|---|---|---|
+| `viewer_canvas/draw.rs` | 588 | 0 | **no** — 17 GL calls deep; it needs a GPU, and the browser suites are the right level |
+| `controls/annot_panel.rs` | 720 | 0 | mostly `html!` view code; low value |
+| `viewer_canvas/input.rs` | 637 | 0 | **yes** — 3 GL references in 637 lines; the rest is pure decisions |
+
+`input.rs` is where **five** of CLAUDE.md's "things that are the way they are for
+a reason" live, and every one of them was a bug before it was a rule: a locked
+shape offers no handles; a point is grabbed by its body and never by a corner; a
+vertex beats an edge beats the body; shift is the vertex modifier, so a
+shift-click that misses does nothing; and a scribble is grabbed by its band. All
+five were enforced by `grab`, and checked only at whatever handful of
+coordinates the browser suites happened to click.
+
+`grab` did two lookups and then decided. The decision is now `grab_at(&Editable,
+x, y, shift, near) -> Option<(Handle, EditKind)>` — pure, beside the types it
+decides over — and `is_worth_keeping` became a free function, having never
+touched `self`. That the extraction left `Handle`, `EditKind` and
+`segment_distance` unused in `input.rs` is the evidence it was a real seam and
+not a line drawn through the middle of something.
+
+Thirteen tests, one per rule, and **every one was mutation-checked**: remove the
+`locked` guard and only the lock test fails; return `Body` before looking at
+vertices and the three ordering tests fail; let `shift` fall through to the body
+and the shift test fails; treat a point as boxlike and the point test fails. A
+rule test that passes against the mutation it names is worth nothing, and this
+session has already written two of those.
+
+The two that were *not* worth testing this way are as much of the result: a
+`draw.rs` test would need a GL context to assert something a screenshot already
+asserts better, and `annot_panel.rs` is markup. A zero is not automatically debt.
+
+- [ ] `src/annotation.rs` (1049) is still unsplit; the plan for it is in task 14.
+
+---
+
+## 17. The metadata parser, against files this repo did not write
+
+Every image fixture in this workspace comes from `synthetic.rs` — 17 call sites —
+and `synthetic.rs` is *our own writer*. So `src/lib.rs` (420 lines, **zero
+tests**), which holds the OME-NGFF structs that real `.zattrs` deserialize into,
+had only ever been shown the exact shape we produce. That is the same failure
+mode as the class-numbering bug in task 13: each half self-consistent, nothing
+comparing them to the outside.
+
+`tests/ngff_metadata.rs` now reads five real documents from three producers —
+`omero-zarr` and Bio-Formats via the IDR, and the specification's own 0.5
+examples — with `tests/data/ngff/SOURCES.md` recording the URL and pinned commit
+of each. Both metadata *locations* are exercised for the first time: 0.4 at the
+root of `.zattrs`, 0.5 under `ome`.
+
+### What it found, and the second one is silent
+
+**1. A multiscale-level `coordinateTransformations` was being dropped.** The
+spec's own example pairs a dataset `scale: [1, 1]` with a multiscale-level
+`scale: [10, 10]` that applies to *every* dataset. `Multiscale` had no such
+field, so serde discarded it: the pixel size of that image is ten, and this
+viewer read one.
+
+**Blast radius, traced rather than assumed** — an earlier draft of this section
+said such a store is "drawn ten times too small", and that is wrong. Nothing
+scales the drawn image by voxel size: level placement comes from array shapes.
+The declared scale reaches exactly one place, `world_scale()`, and its only
+consumers are the ROI table's `*_micrometer` columns. So the real cost is that a
+region saved to or read from `tables/` gets the **wrong physical size**, silently
+— which matters, because micrometers in a table are the one number another tool
+takes at face value, but it is not a wrong picture.
+
+- [x] **Fixed.** `world_scale` now composes the two: the multiscale's scale
+      multiplies each dataset's own, per axis. A level-0 pixel of 0.5 under a
+      global 10 is five micrometres, not either number alone. A factor that is
+      not finite and positive reads as *says nothing about this axis* rather
+      than as a reason to discard what the other transformation said — it must
+      not take the good half down with it. Four tests, all four confirmed to
+      fail against the old one-sided lookup, and one of them runs the
+      specification's own document off disk and asserts it reads ten.
+
+**2. A `bioformats2raw` container root is not an image.** bf2raw — the converter
+most microscopy pipelines actually run — writes a root holding only
+`{"bioformats2raw.layout": 3}`, with each series in a numbered subgroup. Opening
+one finds no `multiscales` and fails. `info_roi.md` describes the key; no code
+reads it. Pinned as today's behaviour so that supporting it is a deliberate
+change with a test that flips.
+
+- [x] **Fixed, and it mattered more than this section first said.** The
+      converter next door, `img2omezarr`, writes this layout for *everything it
+      produces* — `root_attributes()` emits `bioformats2raw.layout: 3`, and its
+      own tests assert it. So this was not an interop nicety: **no store from
+      our own pipeline could be opened** without knowing to append `/0`, and the
+      layer was then called `0`.
+
+      `read_metadata_local` and `read_metadata_async` now resolve a container
+      before parsing multiscales. The layout key and the series index each have
+      the same **two shapes** `multiscales` has — at the root for 0.4, nested
+      under `ome` for 0.5 — and `img2omezarr` writes both, so missing either
+      would have left half its output unopenable. One series opens without
+      asking; several are refused **by name**, because showing one scene of a
+      slide that has three is a wrong picture that looks like a right one; an
+      absent index falls back to `0`, where bioformats2raw always puts the first.
+
+      The decision is three pure functions with unit tests, and
+      `server/tests/bioformats2raw.rs` builds real containers and opens them —
+      four of its five tests fail with the branch disabled, and the fifth is *an
+      ordinary image store is unaffected*, which must pass either way.
+
+      Not covered: the **async** path takes the identical decision by the
+      identical route, but no test opens a container over `http(s)://` or
+      `s3://` — there is no remote fixture in this repo, and this did not seem
+      the place to introduce one.
+
+- [x] **Multi-series opening, and the annotation question it forced.** A
+      container now expands into **one layer per series**, in `Session::add`
+      rather than inside `ZarrStore` — and that placement is the whole answer to
+      the annotation question. A layer's spec becomes the *series*
+      (`container.zarr/0`), so `make_target` writes annotations beside the image
+      they are about, with no special case anywhere in the annotation code. A
+      coordinate space declared at a container root would have been a claim
+      about pixels that are not there.
+
+      Naming: several series are `container.zarr[0]`, `[1]`, `[2]`; a single one
+      keeps the store's plain name, because there is nothing to disambiguate and
+      `container.zarr[0]` is just noise. `Session::add` returns `Vec<String>`
+      now, which is honest — a project line can open more than one layer — and
+      the four call sites and the test fixtures say `only(...)` where they mean
+      one.
+
+      `ZarrStore::open_local` still refuses a multi-series container by name.
+      That is the direct-open path (`roi_table`'s `group_for`, and tests), which
+      cannot expand into a session; the two behaviours are consistent — the
+      session opens them all, a raw store open cannot choose.
+
+      **The gate on that probe was wrong in the first version and every unit
+      test passed anyway.** I skipped the container check for anything with a
+      file extension, to avoid probing `.npy` and `.csv` — but `.zarr` *is* an
+      extension by that test, so the probe never ran on a single real store. It
+      showed up only on running the binary against a container. `.zarr` is a
+      suffix on a directory, not a file type, and the fix is pinned by three
+      tests that fail against the old gate.
+
+### What it confirmed
+
+Three real producers parse cleanly, including the cases the synthetic fixtures
+never generate: a **channel axis with no `unit`** (a channel is not a length),
+`unit: "pixel"` where another writer says micrometer, and unknown members
+(`_creator`, a multiscale `metadata` block, `coefficient`/`family`/`inverted` on
+a channel) ignored rather than refused. A negative result, and worth having:
+those were the fields most likely to be over-strict.
+
+### On writing the assertions
+
+Three of the five tests failed on the first run — every one because **I had
+guessed at the fixtures' contents** rather than read them: the level count, which
+files carry `omero`, and where the transformation sat. The parser was right and
+the test was wrong each time. Worth recording, because a fixture test written
+from an assumption about a file is the same mistake as a parser written from an
+assumption about a format.
+
+---
+
+## 18. Series are alternatives, not overlays
+
+The consequence of task 17's multi-series opening, found by measuring what it
+actually drew rather than by reading the code: a container's series all arrived
+**visible**, and stacked image layers composite *additively* — only the
+bottom-most replaces. Two identical series rendered at **1.75x** the brightness
+of one. Two different scenes would have been a meaningless blend.
+
+Worse, and the part that settles the design: they do not share a coordinate
+space. The world is the reference image's full-resolution x/y, so a container
+whose series are 256² and 1024² put the second in the first's world. That is
+correct for the case the world was built for — a mask over a stain — and wrong
+for scenes of a slide, which are alternatives.
+
+`LayerInfo` gained a `visible` flag, `#[serde(default)]` to `true` so an older
+client or project file still reads as "show it", and the session sets it false
+for every series after the first. The frontend was hardcoding `visible: true`
+at seven sites; it now honours what it is told.
+
+**Not fixed, and deliberately:** the shared world. Making it per-layer
+contradicts an architectural decision everything else rests on, and hiding the
+siblings makes it invisible in practice — you see one scene at a time. Recorded
+as a limitation rather than rebuilt.
+
+### Three wrong guesses about the DOM, in one suite
+
+`tests/browser/suites/series.py` measures this in pixels, and getting there took
+three corrections that are all the same mistake:
+
+* `.channel-header input[type=checkbox]` matches each **channel's** row as well
+  as the layer's, so it reported four boxes for two layers.
+* Scoping to `.channel-control` did not help: that is per channel too.
+* The layer's box is in neither, and is identified by its **label being the
+  layer name** — which the suite now uses, with a check that exactly two were
+  found so a bad selector fails loudly instead of measuring something else.
+
+And once the right control was clicked, the shot was taken before the newly
+shown layer's tiles had arrived: 72 -> 73, which reads exactly like the layer
+not drawing. With a settle it is 72 -> 126, the same 1.75x as before the fix —
+now as the opt-in rather than the default.
+
+Every one of those was found by the suite failing, which is the argument for
+writing it: I had already confirmed the fix with an ad-hoc script and could have
+stopped there.
+
+---
+
+## 19. The remote read path, against real public stores — and the bug it found
+
+Half the reader had **no positive coverage at all**. This codebase has two paths
+almost everywhere — `zarrs::filesystem` synchronously for local, an
+`AsyncOpendalStore` for everything else — and every fixture reads from a temp
+directory. Every remote reference in the test suite was a *negative* one: that a
+URL classifies as remote, that a write is refused without
+`--allow-remote-writes`, that a dead host errors. Nothing had ever opened a
+store over HTTP and got pixels back.
+
+### The stores
+
+From [OME's own catalogue](https://github.com/ome/ome-zarr-catalog) (11 IDR
+datasets, all CC BY 4.0) and the
+[Open SciVis set](https://github.com/InsightSoftwareConsortium/OMEZarrOpenSciVisDatasets),
+picked to cover what no local fixture can:
+
+| store | why |
+|---|---|
+| `idr0062A/6001240.zarr` | an ordinary 0.4 image as `omero-zarr` writes one, with real `omero` settings |
+| `idr0048A/9846151.zarr` | a **`bioformats2raw` container** — the layout `img2omezarr` writes for everything |
+| `backpack.ome.zarr` | **NGFF 0.5 / zarr v3**, metadata under `ome` in `zarr.json` |
+
+`OpenOrganelle` was probed and rejected: its `.zattrs` is `{}` at the paths
+tried, so it is not a plain OME-Zarr there.
+
+### The bug
+
+`real_pixels_come_back_from_a_public_store` failed on its first run with
+`Failed to open array at /5`.
+
+**Metadata resolution and tile reading take different routes to an array, and
+only the first knew about the series.** `read_metadata_*` opened arrays at
+`{prefix}/{path}`; `read_subset` opened `/{path}`. So a store opened at a
+container root described its pyramid perfectly and could not fetch a single
+tile. Everything still worked end to end, because `Session::add` expands a
+container and hands `ZarrStore` the *series* — the broken path is the direct
+open, which is what `roi_table`'s `group_for`, the tests, and any future caller
+use.
+
+`ZarrStore` now carries the prefix and every array path goes through it.
+
+### Where the tests live, and why in two places
+
+`server/tests/public_stores.rs` is `#[ignore]`d — `cargo test` reports it as
+ignored rather than skipping silently — and runs with `make test-network`. It
+reaches the public internet, so putting it in CI would import the IDR's uptime
+into our build, and a red tick meaning "somebody else's server is slow" is worse
+than no tick. A failure there is as likely to be the world moving as a bug.
+
+But a test that does not run in CI cannot be the only guard for a bug, so the
+same defect is pinned **locally** by
+`pixels_come_back_from_a_store_opened_at_its_container_root`, which builds a
+container in a temp directory and reads its deepest level. It fails against the
+un-prefixed read path. That pairing is the shape to copy: the network suite
+finds what local fixtures cannot, and anything it finds gets a local test.

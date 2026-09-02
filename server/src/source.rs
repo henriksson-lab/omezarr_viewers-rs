@@ -91,6 +91,31 @@ impl SourceSpec {
         }
     }
 
+    /// The same source, one path segment deeper.
+    ///
+    /// For naming a series inside a `bioformats2raw` container: the container
+    /// is not an image, its numbered subgroups are, and a layer's spec has to
+    /// be the **series** — that is what decides where its annotations are
+    /// written, and a coordinate space declared at a container root is a claim
+    /// about pixels that are not there.
+    pub fn child(&self, name: &str) -> SourceSpec {
+        match self {
+            SourceSpec::File(path) => SourceSpec::File(path.join(name)),
+            SourceSpec::Http(url) => {
+                SourceSpec::Http(format!("{}/{name}", url.trim_end_matches('/')))
+            }
+            SourceSpec::S3 {
+                profile,
+                bucket,
+                key,
+            } => SourceSpec::S3 {
+                profile: profile.clone(),
+                bucket: bucket.clone(),
+                key: format!("{}/{name}", key.trim_end_matches('/')),
+            },
+        }
+    }
+
     /// A short name for the layer list: the last path component.
     pub fn short_name(&self) -> String {
         let full = self.text();

@@ -175,6 +175,7 @@ impl Api {
                 ObjectSpace::default(),
             )
             .await
+            .map(only)
             .expect("open layer")
     }
 
@@ -250,4 +251,14 @@ fn state(session: Session, allow_remote_writes: bool) -> web::Data<AppState> {
         ontology: None,
         allow_remote_writes,
     })
+}
+
+/// The id of the single layer a source opened as.
+///
+/// `Session::add` returns a list because a `bioformats2raw` container expands
+/// into one layer per series. Every fixture here is one image, so this says so
+/// and fails loudly if that ever stops being true.
+fn only(ids: Vec<String>) -> String {
+    assert_eq!(ids.len(), 1, "expected one layer, got {ids:?}");
+    ids.into_iter().next().expect("one layer")
 }

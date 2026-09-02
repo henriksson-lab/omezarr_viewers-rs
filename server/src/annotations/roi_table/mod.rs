@@ -137,36 +137,67 @@ pub struct RoiTable {
 /// How world coordinates convert to file units, from the reference image's own
 /// metadata.
 ///
-/// `coordinateTransformations` on the *first* dataset — level 0 — is the one
-/// that speaks about full-resolution pixels, which is what the world is. An
-/// axis the scale does not mention, or a store with no transformation at all,
-/// is 1: a pixel and a frame, stated as such rather than invented.
+/// The first `scale` in a list of transformations, if there is one. A
+/// translation moves a level; it does not change how big a voxel is.
+fn scale_of(transforms: &Option<Vec<CoordinateTransformation>>) -> Option<&Vec<f64>> {
+    transforms.as_ref()?.iter().find_map(|t| match t {
+        CoordinateTransformation::Scale { scale } => Some(scale),
+        CoordinateTransformation::Translation { .. } => None,
+    })
+}
+
+/// One axis's factor from one scale, or 1 if it does not usefully say.
+///
+/// A value that is not finite and positive is not a size, and it must not
+/// discard the *other* transformation's word on the same axis — so it reads as
+/// "says nothing here" rather than as a reason to abandon the whole lookup.
+fn factor(scale: Option<&Vec<f64>>, axis: usize) -> f64 {
+    match scale.and_then(|s| s.get(axis)) {
+        Some(value) if value.is_finite() && *value > 0.0 => *value,
+        _ => 1.0,
+    }
+}
+
+/// The size of one world voxel, in micrometres, as the store declares it.
+///
+/// Two transformations compose here, and both are in the spec:
+///
+/// * `coordinateTransformations` on the *first* dataset — level 0 — which is
+///   the one that speaks about full-resolution pixels, which is what the world
+///   is; and
+/// * `coordinateTransformations` on the **multiscale**, which applies to every
+///   dataset on top of its own.
+///
+/// They multiply. The specification's own example pairs a dataset `[1, 1]` with
+/// a multiscale `[10, 10]` and means ten — reading only the first was a silent
+/// wrong number in every `*_micrometer` column this viewer wrote for such a
+/// store, and it is pinned now by `the_spec_example_that_found_this_bug_reads_ten`.
+///
+/// An axis neither one mentions, or a store with no transformation at all, is
+/// 1: a pixel and a frame, stated as such rather than invented.
 pub fn world_scale(metadata: &DatasetMetadata) -> WorldScale {
     let mut size = WorldScale::default();
     let Some(multiscale) = metadata.multiscales.first() else {
         return size;
     };
-    let Some(dataset) = multiscale.datasets.first() else {
+    let per_dataset = scale_of(
+        &multiscale
+            .datasets
+            .first()
+            .and_then(|d| d.coordinate_transformations.clone()),
+    )
+    .cloned();
+    let for_all = scale_of(&multiscale.coordinate_transformations).cloned();
+    if per_dataset.is_none() && for_all.is_none() {
         return size;
-    };
-    let Some(transforms) = &dataset.coordinate_transformations else {
-        return size;
-    };
-    let Some(scale) = transforms.iter().find_map(|t| match t {
-        CoordinateTransformation::Scale { scale } => Some(scale),
-        CoordinateTransformation::Translation { .. } => None,
-    }) else {
-        return size;
-    };
-    for (axis, value) in multiscale.axes.iter().zip(scale.iter()) {
-        if !(value.is_finite() && *value > 0.0) {
-            continue;
-        }
+    }
+    for (axis_index, axis) in multiscale.axes.iter().enumerate() {
+        let value = factor(per_dataset.as_ref(), axis_index) * factor(for_all.as_ref(), axis_index);
         match axis.name.as_str() {
-            "z" => size.voxel[0] = *value,
-            "y" => size.voxel[1] = *value,
-            "x" => size.voxel[2] = *value,
-            "t" => size.seconds = *value,
+            "z" => size.voxel[0] = value,
+            "y" => size.voxel[1] = value,
+            "x" => size.voxel[2] = value,
+            "t" => size.seconds = value,
             _ => {}
         }
     }

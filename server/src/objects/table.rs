@@ -19,7 +19,7 @@
 //! plausible nonsense — which is the failure a hand-written decoder of somebody
 //! else's format has to be protected from.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use super::{ColumnData, NamedColumn, ObjectStore};
 
@@ -61,6 +61,22 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
     let column_count = words[2] as usize;
     let row_count = words[3] as usize;
 
+    // Every count below this point is a number the *file* chose, and the blob is
+    // the only thing that can contradict it. Checked before anything allocates
+    // or multiplies with it: a `Vec::with_capacity` on a u64 from a stranger is
+    // a panic rather than a refusal, and a panic takes the worker thread with it
+    // and says only that something somewhere was too big.
+    //
+    // A column costs at least two words — its type code and its name length —
+    // so a blob holding `words.len()` words cannot describe more columns than
+    // that, whatever it claims.
+    if column_count > words.len() {
+        bail!(
+            "the header claims {column_count} column(s), which {} word(s) cannot describe",
+            words.len()
+        );
+    }
+
     let mut at = 4;
     let mut names = Vec::with_capacity(column_count);
     let mut kinds = Vec::with_capacity(column_count);
@@ -72,12 +88,19 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
             bail!("the header ends inside column {column}");
         };
         at += 2;
+        // `checked_add`, because `name_len` is a u64 from the file: a length near
+        // `usize::MAX` overflows the range's end and indexes from zero instead of
+        // failing, which is a wrong answer where an error was available.
         let name_words = (name_len as usize).div_ceil(8);
-        let Some(chunk) = words.get(at..at + name_words) else {
-            bail!("the header ends inside column {column}'s name");
-        };
-        at += name_words;
-        let mut name_bytes = Vec::with_capacity(name_words * 8);
+        let end = at
+            .checked_add(name_words)
+            .filter(|end| *end <= words.len())
+            .with_context(|| format!("the header ends inside column {column}'s name"))?;
+        let chunk = &words[at..end];
+        at = end;
+        // Sized from the slice that exists rather than from the length that was
+        // claimed, so the allocation cannot be larger than the blob.
+        let mut name_bytes = Vec::with_capacity(chunk.len() * 8);
         for word in chunk {
             name_bytes.extend_from_slice(&word.to_le_bytes());
         }
@@ -92,7 +115,12 @@ pub fn read(bytes: &[u8]) -> Result<ObjectStore> {
 
     let width = POSITION_WORDS + column_count;
     let rows = &words[at..];
-    if rows.len() != row_count * width {
+    // `checked_mul`: a row count near `usize::MAX` wraps to a small product that
+    // happens to match, and the loop below then reads rows that were never
+    // there. Refusing an unrepresentable promise is the same answer as refusing
+    // one the blob does not keep, and it is the same message.
+    let promised = row_count.checked_mul(width);
+    if promised != Some(rows.len()) {
         bail!(
             "the header promises {row_count} row(s) of {width} word(s) and the blob holds {} word(s) of rows",
             rows.len()
@@ -191,6 +219,16 @@ enum ColumnKind {
 
 #[cfg(test)]
 mod tests {
+
+    /// A well-formed four-word header with the counts a test wants to lie about.
+    fn header(column_count: u64, row_count: u64) -> Vec<u8> {
+        let mut blob = Vec::new();
+        for word in [MAGIC, VERSION, column_count, row_count] {
+            blob.extend_from_slice(&word.to_le_bytes());
+        }
+        blob
+    }
+
     use super::*;
 
     #[test]
@@ -316,6 +354,47 @@ mod tests {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let err = read(&bytes).expect_err("refused");
         assert!(format!("{err}").contains("version"), "{err}");
+    }
+
+    /// Found by `server/tests/parser_fuzz.rs` on its first run, as a
+    /// `capacity overflow` panic out of `Vec::with_capacity`.
+    ///
+    /// Every count in this format is a `u64` the *file* chooses, and the blob is
+    /// the only thing that can contradict it. Allocating on one before checking
+    /// it turns a malformed file into a panic, and a panic takes the worker
+    /// thread with it and says only that something somewhere was too big — where
+    /// an error names the file and the number that was wrong.
+    #[test]
+    fn a_column_count_larger_than_the_blob_is_refused_rather_than_allocated() {
+        let mut blob = header(u64::MAX, 0);
+        blob.extend_from_slice(&0u64.to_le_bytes());
+        let error = read(&blob).unwrap_err().to_string();
+        assert!(error.contains("column"), "{error}");
+    }
+
+    /// The same shape one level down: `row_count * width` wraps to a small
+    /// product that happens to match the words that are there, and the loop then
+    /// reads rows nobody wrote.
+    #[test]
+    fn a_row_count_that_overflows_when_multiplied_is_refused() {
+        // One u64 column, so `width` is 4; a row count of `usize::MAX / 4 + 1`
+        // has a product that does not fit.
+        let mut blob = header(1, usize::MAX as u64 / 4 + 1);
+        blob.extend_from_slice(&1u64.to_le_bytes()); // type code: u64
+        blob.extend_from_slice(&1u64.to_le_bytes()); // name length
+        blob.extend_from_slice(b"a\0\0\0\0\0\0\0");
+        let error = read(&blob).unwrap_err().to_string();
+        assert!(error.contains("row(s)"), "{error}");
+    }
+
+    /// And a name length near `usize::MAX`, whose end overflows the range.
+    #[test]
+    fn a_name_longer_than_the_blob_is_refused_rather_than_indexed() {
+        let mut blob = header(1, 0);
+        blob.extend_from_slice(&1u64.to_le_bytes());
+        blob.extend_from_slice(&u64::MAX.to_le_bytes()); // name length
+        let error = read(&blob).unwrap_err().to_string();
+        assert!(error.contains("name"), "{error}");
     }
 
     #[test]

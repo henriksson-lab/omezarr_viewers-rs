@@ -111,6 +111,7 @@ async fn an_object_layer_reports_its_schema_and_bounds() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("add layer");
 
     let layer = session.get(&id).expect("layer");
@@ -145,6 +146,7 @@ async fn a_scale_maps_a_downsampled_detectors_coordinates_into_the_world() {
             },
         )
         .await
+        .map(only)
         .expect("add layer");
 
     let store = session
@@ -157,4 +159,14 @@ async fn a_scale_maps_a_downsampled_detectors_coordinates_into_the_world() {
         .expect("the row at twice the coordinates");
     let position = store.world_position(row).expect("position");
     assert!((position[2] - blob.x as f32 * 2.0).abs() <= 1.0);
+}
+
+/// The id of the single layer a source opened as.
+///
+/// `Session::add` returns a list because a `bioformats2raw` container expands
+/// into one layer per series. Every fixture here is one image, so this says so
+/// and fails loudly if that ever stops being true.
+fn only(ids: Vec<String>) -> String {
+    assert_eq!(ids.len(), 1, "expected one layer, got {ids:?}");
+    ids.into_iter().next().expect("one layer")
 }

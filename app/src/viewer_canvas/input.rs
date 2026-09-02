@@ -15,7 +15,7 @@ use crate::webgl::context::GlContext;
 use crate::webgl::renderer::Renderer;
 
 use super::{
-    camera_world, grab_reach, segment_distance, Camera2d, Drawn, EditKind, Editing, Handle, Tool,
+    camera_world, grab_at, is_worth_keeping as worth_keeping, Camera2d, Drawn, Editing, Tool,
     ViewerCanvas, ViewerCanvasState, ViewerMsg,
 };
 use super::{TileStore, TILE_BUDGET_BYTES};
@@ -521,117 +521,28 @@ impl ViewerCanvas {
 
     /// Which handle of the selected annotation is under `(x, y)`, if any.
     ///
-    /// The order is deliberate: a **vertex** beats an **edge** beats the
-    /// **body**. A vertex is the smallest target and the one a hand aims at; an
-    /// edge is only a target when `shift` asks to insert into it; and the body
-    /// is the fallback that moves the whole shape.
+    /// Two lookups and a decision. The decision is [`grab_at`], which is a pure
+    /// function of the shape and the pointer and so can be tested without a
+    /// browser — five of this viewer's interaction rules live in it, and each
+    /// one was a bug before it was a rule.
     pub(super) fn grab(&self, ctx: &Context<Self>, x: f32, y: f32, shift: bool) -> Option<Editing> {
         let editable = ctx.props().editable.as_ref()?;
-        // `isLocked` is not decoration: a file that says "do not edit this" is
-        // one somebody locked on purpose, and a viewer that edits it anyway is
-        // worse than one that cannot edit at all.
-        if editable.locked {
-            return None;
-        }
         let near = {
             let state = self.state.borrow();
             self.grab_tolerance(state.as_ref()?)
         };
-        let reach = grab_reach(near, editable.stroke_width);
-        let editing = |handle, kind| {
-            Some(Editing {
-                id: editable.id,
-                handle,
-                kind,
-                from: (x, y),
-                to: (x, y),
-            })
-        };
-
-        // A point has nothing but a body: all four of its "corners" are the same
-        // coordinate, so a corner drag would resize a zero-size box into a
-        // zero-size box and look like nothing happening at all.
-        if editable.puncta {
-            let (x0, y0, x1, y1) = editable.bounds;
-            let hit = x >= x0 - near && x <= x1 + near && y >= y0 - near && y <= y1 + near;
-            return hit.then(|| editing(Handle::Body, EditKind::Drag))?;
-        }
-
-        if editable.boxlike {
-            // A rectangle or an ellipse is defined by its bounding box, so that
-            // is what it offers — which is also what QuPath offers for them.
-            let (x0, y0, x1, y1) = editable.bounds;
-            for (west, north, cx, cy) in [
-                (true, true, x0, y0),
-                (false, true, x1, y0),
-                (true, false, x0, y1),
-                (false, false, x1, y1),
-            ] {
-                if (x - cx).abs() <= near && (y - cy).abs() <= near {
-                    return editing(Handle::Corner(west, north), EditKind::Drag);
-                }
-            }
-        } else {
-            // Everything else is edited by its vertices, because a polygon's
-            // shape *is* its vertices.
-            for (path_index, path) in editable.paths.iter().enumerate() {
-                for (vertex, point) in path.iter().enumerate() {
-                    if (x - point.0).abs() <= near && (y - point.1).abs() <= near {
-                        let kind = if shift {
-                            EditKind::DeleteVertex
-                        } else {
-                            EditKind::Drag
-                        };
-                        return editing(Handle::Vertex(path_index, vertex), kind);
-                    }
-                }
-            }
-            // Shift on an edge inserts a vertex there; without shift an edge is
-            // just part of the body, and dragging it moves the whole shape.
-            if shift {
-                for (path_index, path) in editable.paths.iter().enumerate() {
-                    for vertex in 0..path.len() {
-                        let a = path[vertex];
-                        let b = path[(vertex + 1) % path.len()];
-                        if segment_distance(x, y, a, b) <= reach {
-                            return editing(
-                                Handle::Vertex(path_index, vertex),
-                                EditKind::InsertVertex,
-                            );
-                        }
-                    }
-                }
-                return None;
-            }
-        }
-
-        // `reach`, not `near`: the bounds are the *vertices*, and a stroke's
-        // band stands half its width outside them. A click on the visible edge
-        // of a wide scribble is outside the vertex bounds and inside the shape.
-        let (x0, y0, x1, y1) = editable.bounds;
-        if x >= x0 - reach && x <= x1 + reach && y >= y0 - reach && y <= y1 + reach {
-            return editing(Handle::Body, EditKind::Drag);
-        }
-        None
+        let (handle, kind) = grab_at(editable, x, y, shift, near)?;
+        Some(Editing {
+            id: editable.id,
+            handle,
+            kind,
+            from: (x, y),
+            to: (x, y),
+        })
     }
 
-    /// Is this drawn shape worth storing?
-    ///
-    /// A drag that barely moved was a misfire, not a zero-size region, and
-    /// storing it litters the layer with rows nothing can see. A *point* is the
-    /// exception: a click is exactly what it is.
+    /// Is this drawn shape worth storing? See [`is_worth_keeping`].
     pub(super) fn is_worth_keeping(&self, drawn: &Drawn) -> bool {
-        if drawn.tool == Tool::Point {
-            return true;
-        }
-        let Some((x0, y0, x1, y1)) = drawn.corners() else {
-            return false;
-        };
-        if matches!(drawn.tool, Tool::Freehand | Tool::Line) {
-            // A traced path is worth keeping if it went anywhere at all, which
-            // its vertex count says better than its bounding box does.
-            return drawn.points.len() >= 3;
-        }
-        (x1 - x0).abs() >= 1.0 || (y1 - y0).abs() >= 1.0
+        worth_keeping(drawn)
     }
 }

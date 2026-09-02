@@ -80,8 +80,27 @@ test:
 	cd app && cargo clippy --target wasm32-unknown-unknown -- -D warnings
 	cargo fmt --all -- --check
 
+# Deep fuzzing, on demand. The gate that runs every build is the deterministic
+# sweep in `server/tests/parser_fuzz.rs`; this is the search that finds what a
+# few thousand fixed mutations do not. Needs nightly and `cargo install
+# cargo-fuzz` — see fuzz/README.md.
+TARGET ?= table
+TIME ?= 60
+fuzz:
+	@# The corpus directory comes FIRST: libFuzzer writes what it grows into
+	@# the first one it is given, and pointing that at the seeds turns the
+	@# committed inputs into a dumping ground for machine output.
+	cargo +nightly fuzz run $(TARGET) fuzz/corpus/$(TARGET) fuzz/seeds/$(TARGET) -- -max_total_time=$(TIME)
+
+# The remote read path, against real public OME-Zarr stores (OME's own
+# catalogue and the Open SciVis set). Not part of `make test` and not in CI:
+# these reach the public internet, and a red tick that means "the IDR is slow"
+# is worse than no tick. See server/tests/public_stores.rs.
+test-network:
+	cargo test -p server --test public_stores -- --ignored --nocapture
+
 clean:
 	cargo clean
 	rm -rf dist/*
 
-.PHONY: build serve run desktop desktop-bundle demo test clean dev-app dev-server
+.PHONY: build serve run desktop desktop-bundle demo test test-network fuzz clean dev-app dev-server

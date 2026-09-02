@@ -1,0 +1,40 @@
+# Its own workspace on purpose: this crate only builds under nightly with
+# libFuzzer's sanitiser flags, so it must not be pulled into `cargo build
+# --workspace` or `cargo clippy --workspace`, which CI runs on stable.
+[workspace]
+
+[package]
+name = "server-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.server]
+path = "../server"
+
+[[bin]]
+name = "geojson"
+path = "fuzz_targets/geojson.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "table"
+path = "fuzz_targets/table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "npy_header"
+path = "fuzz_targets/npy_header.rs"
+test = false
+doc = false
+bench = false

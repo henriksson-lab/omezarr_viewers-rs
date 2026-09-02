@@ -13,3 +13,12 @@ desktop/gen/schemas/
 # different Python.
 __pycache__/
 *.pyc
+
+# cargo-fuzz working state. `fuzz/seeds/` is committed — those are the valid
+# files every run starts from, and a fuzzer seeded with nothing spends its
+# budget rediscovering the magic word. `corpus/` is what libFuzzer grows from
+# them, `artifacts/` is where it drops a crashing input; both are machine
+# output, and a crash worth keeping becomes a named test instead.
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/

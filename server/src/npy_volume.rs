@@ -332,6 +332,8 @@ fn describe(header: &Header) -> DatasetInfo {
                     coordinate_transformations: None,
                 }],
                 name: Some("npy".to_string()),
+                // A flat `.npy` has one level and no global transform.
+                coordinate_transformations: None,
             }],
             omero: None,
         },

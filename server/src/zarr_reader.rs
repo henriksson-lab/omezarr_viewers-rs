@@ -260,6 +260,14 @@ pub struct ZarrStore {
     /// Raw group attributes, kept so a layer can ask questions this struct does
     /// not answer — `image-label` colours, for one.
     attributes: serde_json::Map<String, serde_json::Value>,
+    /// Where the image sits inside the store: empty for an ordinary one, and
+    /// `/<series>` when this is a `bioformats2raw` container.
+    ///
+    /// Every array path goes through it. Resolving it for the *metadata* and
+    /// not for the reads is a store whose pyramid is described correctly and
+    /// whose pixels cannot be fetched at all — which is precisely what happened
+    /// until a test opened a real container over the network.
+    prefix: String,
 }
 
 impl ZarrStore {
@@ -275,7 +283,7 @@ impl ZarrStore {
             }
             Some(op) => {
                 let store = Arc::new(AsyncOpendalStore::new(op));
-                let (metadata, attributes) = read_metadata_async(&store).await?;
+                let (metadata, attributes, prefix) = read_metadata_async(&store).await?;
                 Ok(Self {
                     backend: StoreBackend::Async {
                         store,
@@ -283,7 +291,46 @@ impl ZarrStore {
                     },
                     metadata,
                     attributes,
+                    prefix,
                 })
+            }
+        }
+    }
+
+    /// The series inside this source, or `None` if it is an ordinary image.
+    ///
+    /// Reads two `.zattrs` and no arrays, so it costs one extra small request
+    /// per layer opened — never per tile. That is the price of not making
+    /// somebody discover by hand that their store has scenes in it.
+    pub async fn series_of(
+        registry: &SourceRegistry,
+        spec: &SourceSpec,
+    ) -> Result<Option<Vec<String>>> {
+        match registry.operator(spec)? {
+            None => {
+                let SourceSpec::File(path) = spec else {
+                    return Ok(None);
+                };
+                let store = Arc::new(FilesystemStore::new(path)?);
+                let Ok(root) = Group::open(store.clone(), "/") else {
+                    return Ok(None);
+                };
+                let ome = Group::open(store, "/OME").ok();
+                Ok(container_series(
+                    root.attributes(),
+                    ome.as_ref().map(|g| g.attributes()),
+                ))
+            }
+            Some(op) => {
+                let store = Arc::new(AsyncOpendalStore::new(op));
+                let Ok(root) = Group::async_open(store.clone(), "/").await else {
+                    return Ok(None);
+                };
+                let ome = Group::async_open(store, "/OME").await.ok();
+                Ok(container_series(
+                    root.attributes(),
+                    ome.as_ref().map(|g| g.attributes()),
+                ))
             }
         }
     }
@@ -292,7 +339,7 @@ impl ZarrStore {
     pub fn open_local(path: &std::path::Path) -> Result<Self> {
         let store =
             Arc::new(FilesystemStore::new(path).context("Failed to open filesystem store")?);
-        let (metadata, attributes) = read_metadata_local(&store)?;
+        let (metadata, attributes, prefix) = read_metadata_local(&store)?;
         Ok(Self {
             backend: StoreBackend::Local {
                 store,
@@ -300,6 +347,7 @@ impl ZarrStore {
             },
             metadata,
             attributes,
+            prefix,
         })
     }
 
@@ -500,7 +548,7 @@ impl ZarrStore {
             .with_context(|| format!("level {level} is outside this dataset"))?
             .path
             .clone();
-        let array_path = format!("/{}", dataset_path);
+        let array_path = format!("{}/{}", self.prefix, dataset_path);
 
         match &self.backend {
             StoreBackend::Local { store, arrays } => {
@@ -617,6 +665,85 @@ struct MetadataParts {
     arrays: Vec<ArrayInfo>,
 }
 
+/// Is this group a **bioformats2raw container** rather than an image?
+///
+/// `bioformats2raw` — and `img2omezarr`, which follows it — writes a root that
+/// holds no pixels at all: just this key, an `OME/` group indexing the series,
+/// and one numbered subgroup per image. It is the standard output of the
+/// conversion path from CZI, ND2, LIF and the rest, so a viewer that cannot
+/// follow it cannot open most data that came off a microscope.
+///
+/// Two shapes, exactly as `multiscales` has two: 0.4 puts the key at the root of
+/// `.zattrs`, 0.5 nests it under `ome`.
+fn is_container(attrs: &Attributes) -> bool {
+    attrs.contains_key(LAYOUT_KEY)
+        || attrs
+            .get("ome")
+            .and_then(|ome| ome.get(LAYOUT_KEY))
+            .is_some()
+}
+
+const LAYOUT_KEY: &str = "bioformats2raw.layout";
+
+/// The series a container's `OME/.zattrs` lists, in its order.
+///
+/// Same two shapes again: Java `bioformats2raw` writes `series` at the root of
+/// that file, `img2omezarr` wraps it under `ome`.
+fn series_list(ome_attrs: &Attributes) -> Vec<String> {
+    let listed = ome_attrs
+        .get("series")
+        .or_else(|| ome_attrs.get("ome").and_then(|ome| ome.get("series")));
+    listed
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The series a container holds, or `None` if this is an ordinary image.
+///
+/// An empty index still means one series: `bioformats2raw` puts the first at
+/// `0` whether or not it wrote the index, and the spec only makes the index a
+/// SHOULD.
+fn container_series(root: &Attributes, ome: Option<&Attributes>) -> Option<Vec<String>> {
+    if !is_container(root) {
+        return None;
+    }
+    let listed = ome.map(series_list).unwrap_or_default();
+    Some(if listed.is_empty() {
+        vec!["0".to_string()]
+    } else {
+        listed
+    })
+}
+
+/// Which series to open, given what the index said.
+///
+/// One is opened without asking, because a container holding a single image is
+/// how every single-scene conversion comes out and making the user append `/0`
+/// to it teaches them nothing. More than one is **refused by name**: picking the
+/// first would silently show one scene of a slide that has several, and a viewer
+/// that quietly drops data is worse than one that says it cannot choose.
+///
+/// An empty index falls back to `0`, which is where `bioformats2raw` puts the
+/// first series whether or not it wrote the index.
+fn choose_series(series: &[String]) -> Result<String> {
+    match series {
+        [] => Ok("0".to_string()),
+        [only] => Ok(only.clone()),
+        many => anyhow::bail!(
+            "this is a bioformats2raw container of {} series, not an image; open one of them \
+             by name — the paths inside this store are {}",
+            many.len(),
+            many.join(", ")
+        ),
+    }
+}
+
 /// Turn fetched metadata parts into the dataset description.
 fn assemble_metadata(parts: MetadataParts) -> (DatasetInfo, Attributes) {
     let MetadataParts {
@@ -638,48 +765,83 @@ fn assemble_metadata(parts: MetadataParts) -> (DatasetInfo, Attributes) {
 }
 
 /// Read OME-Zarr metadata from a local filesystem store.
-fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<(DatasetInfo, Attributes)> {
-    let group = Group::open(store.clone(), "/").context("Failed to open zarr group")?;
-    let attrs = group.attributes().clone();
+fn read_metadata_local(store: &Arc<FilesystemStore>) -> Result<(DatasetInfo, Attributes, String)> {
+    let root = Group::open(store.clone(), "/").context("Failed to open zarr group")?;
+    let root_attrs = root.attributes().clone();
+
+    // A container names the image; an ordinary store *is* one.
+    let (attrs, prefix) = if is_container(&root_attrs) {
+        let index = Group::open(store.clone(), "/OME")
+            .map(|g| series_list(g.attributes()))
+            .unwrap_or_default();
+        let series = choose_series(&index)?;
+        let path = format!("/{series}");
+        let group = Group::open(store.clone(), &path)
+            .with_context(|| format!("this container's series {series} is not a group"))?;
+        (group.attributes().clone(), path)
+    } else {
+        (root_attrs, String::new())
+    };
     let multiscales = parse_multiscales(&attrs)?;
 
     let mut arrays = Vec::new();
     for dataset in &multiscales[0].datasets {
-        let array_path = format!("/{}", dataset.path);
+        let array_path = format!("{prefix}/{}", dataset.path);
         let array = Array::open(store.clone(), &array_path)
             .with_context(|| format!("Failed to open array at {array_path}"))?;
         arrays.push(array_info(array.shape(), &array));
     }
 
-    Ok(assemble_metadata(MetadataParts {
+    let (info, attrs) = assemble_metadata(MetadataParts {
         attrs,
         multiscales,
         arrays,
-    }))
+    });
+    Ok((info, attrs, prefix))
 }
 
 /// Read OME-Zarr metadata from an opendal-backed store.
-async fn read_metadata_async(store: &Arc<AsyncOpendalStore>) -> Result<(DatasetInfo, Attributes)> {
-    let group = Group::async_open(store.clone(), "/")
+async fn read_metadata_async(
+    store: &Arc<AsyncOpendalStore>,
+) -> Result<(DatasetInfo, Attributes, String)> {
+    let root = Group::async_open(store.clone(), "/")
         .await
         .context("Failed to open zarr group")?;
-    let attrs = group.attributes().clone();
+    let root_attrs = root.attributes().clone();
+
+    // The same decision as the local path, reached the same way; only the
+    // fetching differs, which is the shape of most of this file.
+    let (attrs, prefix) = if is_container(&root_attrs) {
+        let index = match Group::async_open(store.clone(), "/OME").await {
+            Ok(group) => series_list(group.attributes()),
+            Err(_) => Vec::new(),
+        };
+        let series = choose_series(&index)?;
+        let path = format!("/{series}");
+        let group = Group::async_open(store.clone(), &path)
+            .await
+            .with_context(|| format!("this container's series {series} is not a group"))?;
+        (group.attributes().clone(), path)
+    } else {
+        (root_attrs, String::new())
+    };
     let multiscales = parse_multiscales(&attrs)?;
 
     let mut arrays = Vec::new();
     for dataset in &multiscales[0].datasets {
-        let array_path = format!("/{}", dataset.path);
+        let array_path = format!("{prefix}/{}", dataset.path);
         let array = Array::async_open(store.clone(), &array_path)
             .await
             .with_context(|| format!("Failed to open array at {array_path}"))?;
         arrays.push(array_info(array.shape(), &array));
     }
 
-    Ok(assemble_metadata(MetadataParts {
+    let (info, attrs) = assemble_metadata(MetadataParts {
         attrs,
         multiscales,
         arrays,
-    }))
+    });
+    Ok((info, attrs, prefix))
 }
 
 /// Summarise one opened array for the API.
@@ -773,6 +935,82 @@ pub fn bytes_to_f32(raw: &[u8], dtype: &str) -> Result<Vec<f32>> {
 
 #[cfg(test)]
 mod tests {
+    use super::{choose_series, is_container, series_list};
+    use serde_json::json;
+
+    fn attrs(value: serde_json::Value) -> super::Attributes {
+        value.as_object().expect("an object").clone()
+    }
+
+    /// The layout key sits in two places, exactly as `multiscales` does: 0.4 at
+    /// the root of `.zattrs`, 0.5 under `ome`. `img2omezarr` writes both,
+    /// depending on the version it is asked for, so missing either means half
+    /// its output stays unopenable.
+    #[test]
+    fn a_container_is_recognised_in_both_of_the_places_the_key_lives() {
+        assert!(is_container(&attrs(json!({"bioformats2raw.layout": 3}))));
+        assert!(is_container(&attrs(
+            json!({"ome": {"version": "0.5", "bioformats2raw.layout": 3}})
+        )));
+    }
+
+    /// And an ordinary image is not a container, however much else it carries.
+    #[test]
+    fn an_image_group_is_not_mistaken_for_a_container() {
+        assert!(!is_container(&attrs(json!({"multiscales": []}))));
+        assert!(!is_container(&attrs(
+            json!({"ome": {"version": "0.5", "multiscales": []}})
+        )));
+        assert!(!is_container(&attrs(json!({}))));
+    }
+
+    /// The series index has the same two shapes: Java `bioformats2raw` writes
+    /// `series` at the root of `OME/.zattrs`, `img2omezarr` wraps it under
+    /// `ome`.
+    #[test]
+    fn the_series_index_is_read_from_either_shape() {
+        assert_eq!(
+            series_list(&attrs(json!({"series": ["0", "1"]}))),
+            vec!["0", "1"]
+        );
+        assert_eq!(
+            series_list(&attrs(json!({"ome": {"series": ["0", "1"]}}))),
+            vec!["0", "1"]
+        );
+        assert!(series_list(&attrs(json!({}))).is_empty());
+    }
+
+    /// One series is opened without asking: a container holding a single image
+    /// is how every single-scene conversion comes out, and making somebody
+    /// append `/0` to it teaches them nothing.
+    #[test]
+    fn a_lone_series_is_opened_without_asking() {
+        assert_eq!(choose_series(&["0".to_string()]).unwrap(), "0");
+        // Not every producer numbers from zero or names them as integers.
+        assert_eq!(choose_series(&["scene-A".to_string()]).unwrap(), "scene-A");
+    }
+
+    /// An index that says nothing falls back to where bioformats2raw always
+    /// puts the first series.
+    #[test]
+    fn an_absent_index_falls_back_to_the_first_series() {
+        assert_eq!(choose_series(&[]).unwrap(), "0");
+    }
+
+    /// Several are refused **by name**. Picking the first would silently show
+    /// one scene of a slide that has several, and a viewer that quietly drops
+    /// data is worse than one that says it cannot choose.
+    #[test]
+    fn several_series_are_refused_and_all_of_them_are_named() {
+        let error = choose_series(&["0".to_string(), "1".to_string(), "2".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("3 series"), "{error}");
+        for name in ["0", "1", "2"] {
+            assert!(error.contains(name), "{name} is not named in: {error}");
+        }
+    }
+
     use super::*;
 
     #[test]

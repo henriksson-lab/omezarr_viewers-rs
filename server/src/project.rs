@@ -118,9 +118,11 @@ impl Project {
                 .add(registry, spec, role, layer.name.clone(), space)
                 .await
             {
-                Ok(id) => {
-                    log::info!("opened {id} from {}", layer.source);
-                    report.opened.push(id);
+                Ok(ids) => {
+                    // A container yields one layer per series, so a project
+                    // line can honestly account for more than one.
+                    log::info!("opened {} from {}", ids.join(", "), layer.source);
+                    report.opened.extend(ids);
                 }
                 Err(e) => report.skip(&layer.source, e),
             }

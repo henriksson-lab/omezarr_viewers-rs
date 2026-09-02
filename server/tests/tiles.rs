@@ -165,6 +165,7 @@ async fn a_session_resolves_named_and_default_layers() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("add labels");
     let image_id = session
         .add(
@@ -175,6 +176,7 @@ async fn a_session_resolves_named_and_default_layers() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("add image");
 
     // The label store was added first, but the default layer is the image one:
@@ -226,6 +228,7 @@ async fn an_object_source_becomes_an_object_layer() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("add objects");
 
     let layer = session.get(&id).expect("layer");
@@ -258,6 +261,7 @@ async fn an_unreadable_object_format_is_refused_by_name() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect_err("refused");
     assert!(format!("{err:#}").contains("parquet"), "{err:#}");
 }
@@ -411,4 +415,14 @@ async fn a_plane_index_past_the_edge_is_clamped_rather_than_refused() {
         .await
         .expect("clamped plane");
     assert_eq!((plane.height, plane.width), (SHAPE[1], SHAPE[2]));
+}
+
+/// The id of the single layer a source opened as.
+///
+/// `Session::add` returns a list because a `bioformats2raw` container expands
+/// into one layer per series. Every fixture here is one image, so this says so
+/// and fails loudly if that ever stops being true.
+fn only(ids: Vec<String>) -> String {
+    assert_eq!(ids.len(), 1, "expected one layer, got {ids:?}");
+    ids.into_iter().next().expect("one layer")
 }

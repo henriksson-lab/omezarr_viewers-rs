@@ -57,6 +57,7 @@ async fn boxes_and_points_survive_a_save_and_a_fresh_session() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("open image");
     let layer = session.add_annotations(Some("drawn".into()), AnnotationSet::new());
 
@@ -105,6 +106,7 @@ async fn boxes_and_points_survive_a_save_and_a_fresh_session() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .unwrap_or_else(|e| panic!("reopening {target}: {e:#}"));
 
     let back = reopened
@@ -211,6 +213,7 @@ async fn opening_something_that_is_not_a_table_says_so() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .unwrap_err()
         .to_string();
     assert!(error.contains("tables"), "{error}");
@@ -306,6 +309,7 @@ async fn an_unsaved_annotation_layer_stays_out_of_a_saved_project() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("open image");
 
     // One layer that has been saved somewhere, and one that has not.
@@ -420,6 +424,7 @@ async fn a_label_store_hands_over_what_it_says_about_each_id() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("open labels");
 
     let info = session.info();
@@ -488,6 +493,7 @@ async fn a_table_written_by_another_tool_opens_as_a_layer() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("open the foreign table");
 
     let set = session
@@ -600,6 +606,7 @@ async fn a_polygon_with_a_hole_survives_a_geojson_round_trip_through_a_session()
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .unwrap_or_else(|e| panic!("reopening {target}: {e:#}"));
     let back = reopened
         .get(&read)
@@ -650,6 +657,7 @@ async fn a_bare_qupath_export_opens_as_a_layer() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("open the export");
 
     let set = session
@@ -731,6 +739,7 @@ async fn a_qupath_cell_keeps_its_nucleus_name_and_type_through_the_viewer() {
             ObjectSpace::default(),
         )
         .await
+        .map(only)
         .expect("open the cell file");
 
     let rows = session
@@ -937,4 +946,14 @@ async fn a_remote_annotation_target_is_told_apart_and_addressed_correctly() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("profile"), "{error}");
+}
+
+/// The id of the single layer a source opened as.
+///
+/// `Session::add` returns a list because a `bioformats2raw` container expands
+/// into one layer per series. Every fixture here is one image, so this says so
+/// and fails loudly if that ever stops being true.
+fn only(ids: Vec<String>) -> String {
+    assert_eq!(ids.len(), 1, "expected one layer, got {ids:?}");
+    ids.into_iter().next().expect("one layer")
 }

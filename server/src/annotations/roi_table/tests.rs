@@ -707,6 +707,7 @@ fn world_scale_comes_from_the_level_0_transformation() {
                 }]),
             }],
             name: None,
+            coordinate_transformations: None,
         }],
         omero: None,
     };
@@ -720,8 +721,91 @@ fn world_scale_comes_from_the_level_0_transformation() {
             axes: vec![],
             datasets: vec![],
             name: None,
+            coordinate_transformations: None,
         }],
         omero: None,
     };
     assert_eq!(world_scale(&silent), WorldScale::default());
+}
+
+/// Axes named once, so the tests below are about the transformations.
+fn zyx_axes() -> Vec<Axis> {
+    ["z", "y", "x"]
+        .iter()
+        .map(|name| Axis {
+            name: (*name).into(),
+            axis_type: Some("space".into()),
+            unit: Some("micrometer".into()),
+        })
+        .collect()
+}
+
+fn with_transforms(per_dataset: Option<Vec<f64>>, for_all: Option<Vec<f64>>) -> DatasetMetadata {
+    DatasetMetadata {
+        multiscales: vec![Multiscale {
+            axes: zyx_axes(),
+            datasets: vec![MultiscaleDataset {
+                path: "0".into(),
+                coordinate_transformations: per_dataset
+                    .map(|scale| vec![CoordinateTransformation::Scale { scale }]),
+            }],
+            name: None,
+            coordinate_transformations: for_all
+                .map(|scale| vec![CoordinateTransformation::Scale { scale }]),
+        }],
+        omero: None,
+    }
+}
+
+/// The spec allows a transformation on the **multiscale** as well as on each
+/// dataset, and it applies to every one of them. Reading only the dataset's
+/// meant a store that put its scale there was measured in the wrong units.
+#[test]
+fn a_multiscale_level_scale_counts_even_when_the_dataset_has_none() {
+    let scale = world_scale(&with_transforms(None, Some(vec![4.0, 2.0, 2.0])));
+    assert_eq!(scale.voxel, [4.0, 2.0, 2.0]);
+}
+
+/// They compose. The multiscale's applies *on top of* each dataset's own, so a
+/// level-0 pixel of 0.5 under a global 10 is five micrometres, not either one.
+#[test]
+fn the_two_scales_multiply_rather_than_one_replacing_the_other() {
+    let scale = world_scale(&with_transforms(
+        Some(vec![1.0, 0.5, 0.5]),
+        Some(vec![10.0, 10.0, 10.0]),
+    ));
+    assert_eq!(scale.voxel, [10.0, 5.0, 5.0]);
+}
+
+/// A value that is not a size says nothing about its axis, and must not throw
+/// away what the *other* transformation said about the same one.
+#[test]
+fn a_nonsense_factor_in_one_transform_does_not_discard_the_other() {
+    let scale = world_scale(&with_transforms(
+        Some(vec![f64::NAN, 0.0, -3.0]),
+        Some(vec![7.0, 7.0, 7.0]),
+    ));
+    assert_eq!(scale.voxel, [7.0, 7.0, 7.0]);
+}
+
+/// The document that found this, read from disk rather than rebuilt here.
+///
+/// `tests/data/ngff/` holds real files, and this one is the specification's own
+/// example: a dataset saying `[1, 1]` under a multiscale saying `[10, 10]`. It
+/// means ten. Before this fix the viewer read one and wrote every
+/// `*_micrometer` column of such a store an order of magnitude out.
+#[test]
+fn the_spec_example_that_found_this_bug_reads_ten() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/data/ngff/spec-0.5-transformations.json"
+    );
+    let text = std::fs::read_to_string(path).expect("the committed spec example");
+    let document: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+    let metadata: DatasetMetadata =
+        serde_json::from_value(document["attributes"]["ome"].clone()).expect("0.5 metadata");
+
+    let scale = world_scale(&metadata);
+    // Two axes, y and x; the file declares no z, which stays a pixel.
+    assert_eq!(scale.voxel, [1.0, 10.0, 10.0]);
 }

@@ -220,6 +220,115 @@ pub fn grab_reach(near: f32, stroke_width: Option<f64>) -> f32 {
     near.max(stroke_width.unwrap_or(0.0) as f32 / 2.0)
 }
 
+/// Which handle of `editable` is under `(x, y)`, and what dragging it would do.
+///
+/// The order is deliberate: a **vertex** beats an **edge** beats the **body**. A
+/// vertex is the smallest target and the one a hand aims at; an edge is only a
+/// target when `shift` asks to insert into it; and the body is the fallback that
+/// moves the whole shape.
+///
+/// Pure, and separated from the component for that reason: every rule in here
+/// was a bug before it was a rule, and a browser is an expensive and coarse way
+/// to ask what a click three pixels from a corner does.
+pub fn grab_at(
+    editable: &Editable,
+    x: f32,
+    y: f32,
+    shift: bool,
+    near: f32,
+) -> Option<(Handle, EditKind)> {
+    // `isLocked` is not decoration: a file that says "do not edit this" is one
+    // somebody locked on purpose, and a viewer that edits it anyway is worse
+    // than one that cannot edit at all.
+    if editable.locked {
+        return None;
+    }
+    let reach = grab_reach(near, editable.stroke_width);
+
+    // A point has nothing but a body: all four of its "corners" are the same
+    // coordinate, so a corner drag would resize a zero-size box into a
+    // zero-size box and look like nothing happening at all.
+    if editable.puncta {
+        let (x0, y0, x1, y1) = editable.bounds;
+        let hit = x >= x0 - near && x <= x1 + near && y >= y0 - near && y <= y1 + near;
+        return hit.then_some((Handle::Body, EditKind::Drag));
+    }
+
+    if editable.boxlike {
+        // A rectangle or an ellipse is defined by its bounding box, so that
+        // is what it offers — which is also what QuPath offers for them.
+        let (x0, y0, x1, y1) = editable.bounds;
+        for (west, north, cx, cy) in [
+            (true, true, x0, y0),
+            (false, true, x1, y0),
+            (true, false, x0, y1),
+            (false, false, x1, y1),
+        ] {
+            if (x - cx).abs() <= near && (y - cy).abs() <= near {
+                return Some((Handle::Corner(west, north), EditKind::Drag));
+            }
+        }
+    } else {
+        // Everything else is edited by its vertices, because a polygon's
+        // shape *is* its vertices.
+        for (path_index, path) in editable.paths.iter().enumerate() {
+            for (vertex, point) in path.iter().enumerate() {
+                if (x - point.0).abs() <= near && (y - point.1).abs() <= near {
+                    let kind = if shift {
+                        EditKind::DeleteVertex
+                    } else {
+                        EditKind::Drag
+                    };
+                    return Some((Handle::Vertex(path_index, vertex), kind));
+                }
+            }
+        }
+        // Shift on an edge inserts a vertex there; without shift an edge is
+        // just part of the body, and dragging it moves the whole shape.
+        if shift {
+            for (path_index, path) in editable.paths.iter().enumerate() {
+                for vertex in 0..path.len() {
+                    let a = path[vertex];
+                    let b = path[(vertex + 1) % path.len()];
+                    if segment_distance(x, y, a, b) <= reach {
+                        return Some((Handle::Vertex(path_index, vertex), EditKind::InsertVertex));
+                    }
+                }
+            }
+            return None;
+        }
+    }
+
+    // `reach`, not `near`: the bounds are the *vertices*, and a stroke's
+    // band stands half its width outside them. A click on the visible edge
+    // of a wide scribble is outside the vertex bounds and inside the shape.
+    let (x0, y0, x1, y1) = editable.bounds;
+    if x >= x0 - reach && x <= x1 + reach && y >= y0 - reach && y <= y1 + reach {
+        return Some((Handle::Body, EditKind::Drag));
+    }
+    None
+}
+
+/// Is this drawn shape worth storing?
+///
+/// A drag that barely moved was a misfire, not a zero-size region, and storing
+/// it litters the layer with rows nothing can see. A *point* is the exception:
+/// a click is exactly what it is.
+pub fn is_worth_keeping(drawn: &Drawn) -> bool {
+    if drawn.tool == Tool::Point {
+        return true;
+    }
+    let Some((x0, y0, x1, y1)) = drawn.corners() else {
+        return false;
+    };
+    if matches!(drawn.tool, Tool::Freehand | Tool::Line) {
+        // A traced path is worth keeping if it went anywhere at all, which its
+        // vertex count says better than its bounding box does.
+        return drawn.points.len() >= 3;
+    }
+    (x1 - x0).abs() >= 1.0 || (y1 - y0).abs() >= 1.0
+}
+
 /// A shape the user just finished drawing, in world pixels.
 ///
 /// A path rather than two corners, because most of these tools are not
@@ -778,7 +887,197 @@ mod tile_store_tests {
 
 #[cfg(test)]
 mod grab_tests {
-    use super::grab_reach;
+    use super::{grab_at, grab_reach, is_worth_keeping, Drawn, EditKind, Editable, Handle, Tool};
+
+    /// A square with vertices at the corners, as a polygon layer would offer it.
+    fn square(size: f32) -> Editable {
+        Editable {
+            id: 1,
+            bounds: (0.0, 0.0, size, size),
+            paths: vec![vec![(0.0, 0.0), (size, 0.0), (size, size), (0.0, size)]],
+            boxlike: false,
+            puncta: false,
+            locked: false,
+            stroke_width: None,
+        }
+    }
+
+    const NEAR: f32 = 4.0;
+
+    // -- the five rules that live in this decision -------------------------
+
+    /// A file that says "do not edit this" is one somebody locked on purpose.
+    #[test]
+    fn a_locked_shape_offers_no_handles_at_all() {
+        let mut shape = square(100.0);
+        shape.locked = true;
+        for (x, y) in [(0.0, 0.0), (50.0, 50.0), (100.0, 100.0)] {
+            assert_eq!(grab_at(&shape, x, y, false, NEAR), None, "at ({x}, {y})");
+            assert_eq!(
+                grab_at(&shape, x, y, true, NEAR),
+                None,
+                "shift at ({x}, {y})"
+            );
+        }
+    }
+
+    /// All four of a point's corners are the same coordinate, so a corner drag
+    /// resizes a zero-size box into a zero-size box — which looks exactly like a
+    /// broken drag.
+    #[test]
+    fn a_point_is_grabbed_by_its_body_never_by_a_corner() {
+        let point = Editable {
+            bounds: (30.0, 30.0, 30.0, 30.0),
+            paths: vec![vec![(30.0, 30.0)]],
+            puncta: true,
+            ..square(0.0)
+        };
+        assert_eq!(
+            grab_at(&point, 30.0, 30.0, false, NEAR),
+            Some((Handle::Body, EditKind::Drag))
+        );
+        // Its own coordinate is also its corner, and it still answers Body.
+        assert_eq!(
+            grab_at(&point, 32.0, 32.0, false, NEAR),
+            Some((Handle::Body, EditKind::Drag))
+        );
+        assert_eq!(grab_at(&point, 60.0, 60.0, false, NEAR), None, "well clear");
+    }
+
+    /// A vertex beats an edge beats the body: the vertex is the smallest target
+    /// and the one a hand aims at.
+    #[test]
+    fn a_vertex_wins_over_the_body_it_sits_on() {
+        let shape = square(100.0);
+        assert_eq!(
+            grab_at(&shape, 1.0, 1.0, false, NEAR),
+            Some((Handle::Vertex(0, 0), EditKind::Drag)),
+            "next to the first vertex"
+        );
+        assert_eq!(
+            grab_at(&shape, 50.0, 50.0, false, NEAR),
+            Some((Handle::Body, EditKind::Drag)),
+            "in the middle, far from every vertex"
+        );
+    }
+
+    /// Shift is the vertex modifier, so a shift-click that misses does nothing.
+    /// Panning instead would send the picture sliding away from somebody who was
+    /// aiming at a handle and was three pixels out.
+    #[test]
+    fn shift_deletes_a_vertex_inserts_on_an_edge_and_otherwise_does_nothing() {
+        let shape = square(100.0);
+        assert_eq!(
+            grab_at(&shape, 0.0, 0.0, true, NEAR),
+            Some((Handle::Vertex(0, 0), EditKind::DeleteVertex)),
+            "on a vertex"
+        );
+        assert_eq!(
+            grab_at(&shape, 50.0, 0.0, true, NEAR),
+            Some((Handle::Vertex(0, 0), EditKind::InsertVertex)),
+            "halfway along the first edge"
+        );
+        assert_eq!(
+            grab_at(&shape, 50.0, 50.0, true, NEAR),
+            None,
+            "inside the shape but on nothing: a miss, not a pan"
+        );
+    }
+
+    /// A rectangle or an ellipse is defined by its bounding box, so that is what
+    /// it offers — which is what QuPath offers for them too.
+    #[test]
+    fn a_boxlike_shape_offers_corners_rather_than_vertices() {
+        let mut shape = square(100.0);
+        shape.boxlike = true;
+        shape.paths.clear();
+        assert_eq!(
+            grab_at(&shape, 0.0, 0.0, false, NEAR),
+            Some((Handle::Corner(true, true), EditKind::Drag))
+        );
+        assert_eq!(
+            grab_at(&shape, 100.0, 100.0, false, NEAR),
+            Some((Handle::Corner(false, false), EditKind::Drag))
+        );
+        assert_eq!(
+            grab_at(&shape, 50.0, 50.0, false, NEAR),
+            Some((Handle::Body, EditKind::Drag)),
+            "the middle is still the body"
+        );
+    }
+
+    /// A scribble is aimed at by the band on screen, not by the centreline
+    /// inside it.
+    #[test]
+    fn a_scribble_is_grabbed_across_its_band() {
+        let mut path = Editable {
+            bounds: (0.0, 0.0, 0.0, 100.0),
+            paths: vec![vec![(0.0, 0.0), (0.0, 100.0)]],
+            ..square(0.0)
+        };
+        // 9 world px off the centreline: outside the hand's 4, and outside the
+        // vertex bounds, which are a zero-width line.
+        assert_eq!(
+            grab_at(&path, 9.0, 50.0, true, NEAR),
+            None,
+            "a bare line covers no pixels, so this is a miss"
+        );
+        path.stroke_width = Some(24.0);
+        assert_eq!(
+            grab_at(&path, 9.0, 50.0, true, NEAR),
+            Some((Handle::Vertex(0, 0), EditKind::InsertVertex)),
+            "the same click, on a band 24 wide, lands on the shape"
+        );
+        assert_eq!(
+            grab_at(&path, 24.0, 50.0, true, NEAR),
+            None,
+            "and the band is a bound, not an unbounded target"
+        );
+    }
+
+    // -- what is worth storing ---------------------------------------------
+
+    fn drawn(tool: Tool, points: &[(f32, f32)]) -> Drawn {
+        Drawn {
+            tool,
+            points: points.to_vec(),
+        }
+    }
+
+    /// A near-zero drag was a misfire, not a zero-size region — except from the
+    /// point tool, where a click is exactly what it is.
+    #[test]
+    fn a_click_is_a_point_and_a_misfire_everywhere_else() {
+        assert!(is_worth_keeping(&drawn(Tool::Point, &[(5.0, 5.0)])));
+        assert!(!is_worth_keeping(&drawn(
+            Tool::Box,
+            &[(5.0, 5.0), (5.2, 5.1)]
+        )));
+        assert!(is_worth_keeping(&drawn(
+            Tool::Box,
+            &[(5.0, 5.0), (25.0, 25.0)]
+        )));
+    }
+
+    /// A traced path says it went somewhere by its vertex count, not by its box:
+    /// a long stroke drawn straight down has no width at all.
+    #[test]
+    fn a_trace_is_judged_by_its_vertices_not_by_its_bounding_box() {
+        let straight_down = drawn(Tool::Line, &[(0.0, 0.0), (0.0, 50.0), (0.0, 99.0)]);
+        assert!(
+            is_worth_keeping(&straight_down),
+            "zero width, and plainly a stroke somebody meant"
+        );
+        assert!(!is_worth_keeping(&drawn(
+            Tool::Line,
+            &[(0.0, 0.0), (0.0, 9.0)]
+        )));
+    }
+
+    #[test]
+    fn a_shape_with_no_points_is_not_a_shape() {
+        assert!(!is_worth_keeping(&drawn(Tool::Box, &[])));
+    }
 
     #[test]
     fn a_bare_line_is_grabbed_by_the_hands_tolerance() {

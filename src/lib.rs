@@ -16,6 +16,20 @@ pub struct Multiscale {
     pub datasets: Vec<MultiscaleDataset>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Transformations that apply to **every** dataset, on top of each one's
+    /// own — the spec's own example pairs a dataset `scale: [1, 1]` with a
+    /// multiscale `scale: [10, 10]`, and the pixel size is ten.
+    ///
+    /// **Parsed here and not yet applied anywhere.** `world_scale()` reads only
+    /// the first dataset's own transform, so for a store that uses this one the
+    /// declared voxel size is wrong — and that size is what the ROI table's
+    /// `*_micrometer` columns are written with. The picture is unaffected:
+    /// levels are placed from array shapes, not from these.
+    ///
+    /// Read rather than dropped because a field missing from the struct cannot
+    /// even be noticed. See `tests/ngff_metadata.rs` and QUALITY.md task 17.
+    #[serde(default, rename = "coordinateTransformations")]
+    pub coordinate_transformations: Option<Vec<CoordinateTransformation>>,
 }
 
 /// A single axis in the multiscale specification (e.g. x, y, z, c, t).
@@ -177,7 +191,23 @@ pub struct LayerInfo {
     pub name: String,
     /// The source URI as given (`file:///…`, `http(s)://…`, `s3://…`).
     pub source: String,
+    /// Whether the viewer should draw this layer when it first appears.
+    ///
+    /// Almost always true — a layer nobody asked to hide is one to show. It is
+    /// false for the second and later **series of a `bioformats2raw`
+    /// container**, which are alternative scenes rather than things to overlay:
+    /// stacked image layers composite additively, so showing three at once sums
+    /// three unrelated pictures into one that means nothing.
+    ///
+    /// `default` so that a client or a project file written before this existed
+    /// still reads as "show it".
+    #[serde(default = "shown")]
+    pub visible: bool,
     pub kind: LayerKind,
+}
+
+fn shown() -> bool {
+    true
 }
 
 /// What a layer holds, and the metadata that kind of data carries.

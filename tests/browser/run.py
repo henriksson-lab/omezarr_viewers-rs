@@ -25,7 +25,7 @@ from cdp import ORIGIN_CHECK_FROM, Browser, chrome_version  # noqa: E402
 from harness import Checks, Server, Viewer, binary, demo_store  # noqa: E402
 
 SUITES = ["drawing", "editing", "classes", "hierarchy", "formats", "tables", "picking",
-          "classing", "grid", "caching", "supervision"]
+          "classing", "grid", "caching", "supervision", "series"]
 
 
 def feature_table(store):
@@ -55,6 +55,24 @@ def feature_table(store):
     _write(os.path.join(group, "table.csv"), "\n".join(rows) + "\n")
 
 
+def container_store(directory, store):
+    """Re-lay the demo image as a two-series `bioformats2raw` container.
+
+    Built here rather than by `make_demo`, because the point is a store shaped
+    the way *another* tool writes one — `bioformats2raw` and `img2omezarr` both
+    do, for everything they produce.
+    """
+    root = os.path.join(directory, "container.zarr")
+    os.makedirs(os.path.join(root, "OME"), exist_ok=True)
+    _write(os.path.join(root, ".zgroup"), '{"zarr_format":2}')
+    _write(os.path.join(root, ".zattrs"), '{"bioformats2raw.layout":3}')
+    _write(os.path.join(root, "OME", ".zgroup"), '{"zarr_format":2}')
+    _write(os.path.join(root, "OME", ".zattrs"), '{"series":["0","1"]}')
+    for series in ("0", "1"):
+        shutil.copytree(store, os.path.join(root, series))
+    return root
+
+
 def _write(path, text):
     with open(path, "w") as handle:
         handle.write(text)
@@ -67,6 +85,8 @@ def run_suite(module, shots, keep):
     server = viewer = None
     try:
         store = demo_store(directory, getattr(module, "NEEDS_SHAPE", None))
+        if getattr(module, "NEEDS_CONTAINER", False):
+            store = container_store(directory, store)
         layers = []
         if getattr(module, "NEEDS_FEATURE_TABLE", False):
             feature_table(store)

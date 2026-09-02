@@ -250,8 +250,8 @@ pub async fn add_layer(data: web::Data<AppState>, body: web::Json<AddLayer>) -> 
         .add(&data.registry, spec, role, body.name, space)
         .await
     {
-        Ok(id) => {
-            log::info!("Added layer {id}");
+        Ok(ids) => {
+            log::info!("Added layer(s) {}", ids.join(", "));
             HttpResponse::Ok().json(session.info())
         }
         Err(e) => {

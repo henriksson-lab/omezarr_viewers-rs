@@ -1,0 +1,11 @@
+{"type":"FeatureCollection","features":[
+ {"type":"Feature","id":"e3b0c442-98fc-1c14-9afb-4c8996fb9242",
+  "geometry":{"type":"Polygon","coordinates":[[[100,200],[300,200],[300,400],[100,400],[100,200]],[[150,250],[200,250],[200,300],[150,300],[150,250]]],"plane":{"c":-1,"z":3,"t":1}},
+  "properties":{"objectType":"annotation","name":"Region 1","color":[255,0,0],
+   "classification":{"names":["Tumor"],"color":[200,0,0]},"isLocked":true,
+   "measurements":{"Area":1234.5},"metadata":{"note":"checked"},
+   "strokeWidth":7.0,"denseRegion":true,"zExtent":5,
+   "childObjects":[{"type":"Feature","geometry":{"type":"Point","coordinates":[150,260]},
+     "nucleusGeometry":{"type":"Polygon","coordinates":[[[148,258],[152,258],[152,262],[148,262],[148,258]]]},
+     "properties":{"objectType":"cell","classification":{"name":"Cell"}}}]}},
+ {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[0,0],[10,0],[10,10],[0,10],[0,0]]],"isEllipse":true},"properties":{"objectType":"annotation"}}]}

@@ -110,6 +110,8 @@ pub struct Layer {
     pub name: String,
     pub spec: SourceSpec,
     pub data: LayerData,
+    /// Whether a viewer should draw this on arrival. See [`LayerInfo::visible`].
+    pub visible: bool,
 }
 
 impl Layer {
@@ -164,6 +166,7 @@ impl Layer {
             id: self.id.clone(),
             name: self.name.clone(),
             source: self.spec.uri(),
+            visible: self.visible,
             kind,
         }
     }
@@ -377,12 +380,19 @@ impl Session {
         self.layers.len() != before
     }
 
-    /// Open a source and append it as a layer.
+    /// Open a source and append it as one or more layers.
     ///
     /// What the source *is* decides the layer kind: a table becomes objects, a
     /// `.npy` becomes a volume, a zarr store with `image-label` metadata
     /// becomes labels, and everything else is an image. `role` overrides the
     /// guess where the file cannot say for itself.
+    ///
+    /// **More than one layer** when the source is a `bioformats2raw` container:
+    /// its root holds no pixels, and each numbered subgroup is an image. They
+    /// are expanded here rather than inside `ZarrStore` so that a layer's spec
+    /// is the *series* — which is what decides where its annotations are
+    /// written, and a coordinate space declared at a container root would be a
+    /// claim about pixels that are not there.
     pub async fn add(
         &mut self,
         registry: &SourceRegistry,
@@ -390,7 +400,68 @@ impl Session {
         role: LayerRole,
         name: Option<String>,
         space: ObjectSpace,
-    ) -> Result<String> {
+    ) -> Result<Vec<String>> {
+        // Only a zarr group can be a container, so the probe is skipped for
+        // anything naming a file — a `.npy` volume, a `.csv` or a table blob.
+        // `.zarr` itself is *not* such a name: it is the conventional suffix on
+        // a store directory, and gating this on "has no extension" is how the
+        // first version of this silently never ran.
+        let probe = matches!(spec.extension().as_deref(), None | Some("zarr"));
+        if probe {
+            if let Some(series) = ZarrStore::series_of(registry, &spec)
+                .await
+                .with_context(|| format!("opening {}", spec.uri()))?
+            {
+                let mut ids = Vec::new();
+                for (index, one) in series.iter().enumerate() {
+                    // A container holding a single image is how every
+                    // single-scene conversion comes out; there is nothing to
+                    // disambiguate, so it keeps the store's own name.
+                    let layer_name = match (&name, series.len()) {
+                        (Some(given), 1) => given.clone(),
+                        (Some(given), _) => format!("{given}[{one}]"),
+                        (None, 1) => spec.short_name(),
+                        (None, _) => format!("{}[{}]", spec.short_name(), one),
+                    };
+                    let opened = Box::pin(self.add(
+                        registry,
+                        spec.child(one),
+                        role,
+                        Some(layer_name),
+                        space,
+                    ))
+                    .await?;
+                    // Every series after the first arrives hidden. They are
+                    // alternative scenes, not things to overlay: stacked image
+                    // layers composite *additively*, so leaving them all on
+                    // sums unrelated pictures into one that means nothing — and
+                    // they do not even share a coordinate space, since the
+                    // world is the first image's and a second scene is rarely
+                    // the same size.
+                    if index > 0 {
+                        for id in &opened {
+                            if let Some(layer) = self.layers.iter_mut().find(|l| &l.id == id) {
+                                layer.visible = false;
+                            }
+                        }
+                    }
+                    ids.push(opened);
+                }
+                return Ok(ids.into_iter().flatten().collect());
+            }
+        }
+        self.add_one(registry, spec, role, name, space).await
+    }
+
+    /// Open exactly one source as exactly one layer.
+    async fn add_one(
+        &mut self,
+        registry: &SourceRegistry,
+        spec: SourceSpec,
+        role: LayerRole,
+        name: Option<String>,
+        space: ObjectSpace,
+    ) -> Result<Vec<String>> {
         // An object table is not a zarr store, so it is answered here rather
         // than by `zarrs` failing to find multiscales metadata in a CSV.
         //
@@ -401,7 +472,9 @@ impl Session {
         // An ROI table is a group inside a store, not a store: `zarrs` would
         // find no multiscales metadata under it and say so in the wrong words.
         if matches!(role, LayerRole::Annotations) {
-            return self.add_annotation_source(registry, spec, name).await;
+            return Ok(vec![
+                self.add_annotation_source(registry, spec, name).await?,
+            ]);
         }
 
         let extension = spec.extension().unwrap_or_default();
@@ -431,7 +504,11 @@ impl Session {
                 store.len(),
                 store.columns().len()
             );
-            return Ok(self.push(spec, LayerData::Objects(Arc::new(store)), name));
+            return Ok(vec![self.push(
+                spec,
+                LayerData::Objects(Arc::new(store)),
+                name,
+            )]);
         }
 
         // A `.npy` is not a zarr store; it is a flat array, and it is the only
@@ -461,7 +538,7 @@ impl Session {
         } else {
             LayerData::Image(store)
         };
-        Ok(self.push(spec, data, name))
+        Ok(vec![self.push(spec, data, name)])
     }
 
     /// Append an already-opened layer, assigning it an id.
@@ -474,6 +551,9 @@ impl Session {
             name,
             spec,
             data,
+            // Shown unless something says otherwise; `add` hides the series
+            // after the first when it expands a container.
+            visible: true,
         });
         id
     }
